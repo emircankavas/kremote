@@ -4,7 +4,21 @@ A native macOS multi-protocol remote connection client, with a connection tree,
 folders with attribute inheritance, tabbed sessions and direct import of
 `confCons.xml` files produced by [mRemoteNG](https://github.com/mRemoteNG/mRemoteNG).
 
-**Status:** early — Faz 2 (mRemoteNG import). No protocol is implemented yet.
+**Status:** early — Faz 3 (SSH sessions). SSH is the only implemented protocol.
+
+## SSH sessions
+
+Double-click a connection (or right-click ▸ Open) to open a tab with a live
+interactive shell.
+
+- Transport: [Citadel](https://github.com/orlandos-nl/Citadel) (pure Swift, NIOSSH).
+- Terminal: [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) `TerminalView`.
+- Authentication uses the node's username + the **Keychain password** resolved
+  through folder inheritance — the passwords imported from mRemoteNG just work.
+- **Host keys**: trust-on-first-use, stored in
+  `~/Library/Application Support/KRemote/known_hosts.json`. First contact is
+  accepted and recorded; a later key change for the same host:port refuses the
+  connection (possible MITM). A user-facing "accept this key?" prompt is a TODO.
 
 ## mRemoteNG import
 
@@ -39,9 +53,9 @@ publicly documented scheme; no mRemoteNG code or assets are used.
 ## Layout
 
 ```
-Sources/KRemoteCore/   tree model, inheritance, JSON store, Keychain  (unit-tested)
-Sources/KRemote/       SwiftUI app: sidebar, tabs, editor sheet
-Tests/KRemoteCoreTests/
+Packages/KRemoteCore/  local SwiftPM package: tree model, inheritance, JSON store,
+                       Keychain, mRemoteNG crypto/import, Citadel SSH session  (unit-tested)
+Sources/KRemote/       SwiftUI app: sidebar, tabs, editor sheet, SwiftTerm host
 ```
 
 ## Scope
@@ -52,6 +66,7 @@ Tests/KRemoteCoreTests/
 ## Stack
 
 - Swift 6 + SwiftUI, macOS 15+, [XcodeGen](https://github.com/yonaskolb/XcodeGen)
+- [Citadel](https://github.com/orlandos-nl/Citadel) (MIT) — SSH client (NIOSSH)
 - [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) (MIT) — terminal emulation
 - No `.xcodeproj` in git; `project.yml` is the source of truth.
 
