@@ -16,7 +16,7 @@ public enum ConfConsImporter {
         public var usedCustomPassphrase: Bool
     }
 
-    public enum ImportError: Error, CustomStringConvertible {
+    public enum ImportError: Error, Equatable, CustomStringConvertible {
         case notXML
         case missingRootElement
         case fullFileEncryptionUnsupported
