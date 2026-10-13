@@ -9,7 +9,7 @@ import PackageDescription
 let package = Package(
     name: "KRemoteCore",
     platforms: [
-        .macOS(.v15),
+        .macOS("15.0"),
     ],
     products: [
         .library(name: "KRemoteCore", targets: ["KRemoteCore"]),
