@@ -68,6 +68,40 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
         self.children = children
     }
 
+    /// Tolerant decoding: every field except `id`/`kind`/`name` falls back to a
+    /// sensible default when its key is absent. Files written by older versions
+    /// (before `identityFile`/`remoteCommand` existed) therefore keep loading
+    /// instead of failing with `keyNotFound`.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.kind = try container.decode(Kind.self, forKey: .kind)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.host = try container.decodeIfPresent(String.self, forKey: .host) ?? ""
+        self.port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 0
+        self.username = try container.decodeIfPresent(String.self, forKey: .username) ?? ""
+        self.protocolName = try container.decodeIfPresent(String.self, forKey: .protocolName) ?? ""
+        self.identityFile = try container.decodeIfPresent(String.self, forKey: .identityFile) ?? ""
+        self.remoteCommand = try container.decodeIfPresent(String.self, forKey: .remoteCommand) ?? ""
+        // Passwords live in the Keychain, never in the tree file.
+        self.password = ""
+        self.children = try container.decodeIfPresent([ConnectionNode].self, forKey: .children) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(name, forKey: .name)
+        try container.encode(host, forKey: .host)
+        try container.encode(port, forKey: .port)
+        try container.encode(username, forKey: .username)
+        try container.encode(protocolName, forKey: .protocolName)
+        try container.encode(identityFile, forKey: .identityFile)
+        try container.encode(remoteCommand, forKey: .remoteCommand)
+        try container.encode(children, forKey: .children)
+    }
+
     public var isFolder: Bool { kind == .folder }
 
     /// Optional-typed children for SwiftUI's `OutlineGroup`; nil marks a leaf.
