@@ -128,8 +128,8 @@ private struct TerminalArea: View {
             let layout = model.paneLayout
             let columns = layout.columns
             let rows = layout.rows
-            let cellWidth = (geometry.size.width - gap * CGFloat(columns - 1)) / CGFloat(columns)
-            let cellHeight = (geometry.size.height - gap * CGFloat(rows - 1)) / CGFloat(rows)
+            let cellW = (geometry.size.width - gap * CGFloat(columns - 1)) / CGFloat(columns)
+            let cellH = (geometry.size.height - gap * CGFloat(rows - 1)) / CGFloat(rows)
 
             ZStack(alignment: .topLeading) {
                 // Every session stays mounted for its whole life; only the ones in
@@ -143,10 +143,10 @@ private struct TerminalArea: View {
                         onFocus: { model.focus(session.id) }
                     )
                     .frame(
-                        width: cellWidth(for: session, cellWidth: cellWidth),
-                        height: cellHeight(for: session, cellHeight: cellHeight)
+                        width: visibleWidth(for: session, cellWidth: cellW),
+                        height: visibleHeight(for: session, cellHeight: cellH)
                     )
-                    .offset(offset(for: session, cellWidth: cellWidth, cellHeight: cellHeight, columns: columns))
+                    .offset(offset(for: session, cellWidth: cellW, cellHeight: cellH, columns: columns))
                     .opacity(isVisible(session) ? 1 : 0)
                     .allowsHitTesting(isVisible(session))
                 }
@@ -155,8 +155,8 @@ private struct TerminalArea: View {
                 if model.splitMode {
                     ForEach(emptyTileIndices, id: \.self) { index in
                         EmptyPaneView(tileIndex: index)
-                            .frame(width: cellWidth, height: cellHeight)
-                            .offset(cellOffset(index, cellWidth: cellWidth, cellHeight: cellHeight, columns: columns))
+                            .frame(width: cellW, height: cellH)
+                            .offset(cellOffset(index, cellWidth: cellW, cellHeight: cellH, columns: columns))
                     }
                 }
             }
@@ -178,11 +178,11 @@ private struct TerminalArea: View {
         visibleTileIndex(of: session) != nil
     }
 
-    private func cellWidth(for session: Session, cellWidth: CGFloat) -> CGFloat {
+    private func visibleWidth(for session: Session, cellWidth: CGFloat) -> CGFloat {
         isVisible(session) ? cellWidth : 1
     }
 
-    private func cellHeight(for session: Session, cellHeight: CGFloat) -> CGFloat {
+    private func visibleHeight(for session: Session, cellHeight: CGFloat) -> CGFloat {
         isVisible(session) ? cellHeight : 1
     }
 
@@ -245,7 +245,6 @@ private struct EmptyPaneView: View {
 private struct SessionContent: View {
     @Environment(AppModel.self) private var model
     let session: Session
-    let isVisible: Bool
     let isFocused: Bool
     let showPaneChrome: Bool
     let onFocus: () -> Void
@@ -292,7 +291,7 @@ private struct SessionContent: View {
                     }
                 },
                 onTitleChange: { model.updateTitle(session.id, title: $0) },
-                onFocus: onFocus
+                onFocus: { model.focus(session.id) }
             )
             .id(session.generation)
         } else if let node = model.find(session.nodeID) {
