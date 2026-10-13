@@ -10,9 +10,9 @@ options:
 packages:
   swift-crypto:
     url: https://github.com/apple/swift-crypto
-    # Pin exactly: 5.x needs a Swift 6.2 toolchain (absent from current CI Xcode),
-    # and the PBKDF2/GCM APIs used here already exist in 4.5.x.
-    exactVersion: 4.5.2
+    # Must stay <4.0.0: Citadel pins swift-crypto to 3.12.3..<4.0.0.
+    # Named "CryptoExtras" only from 4.x; in 3.x the product is "_CryptoExtras".
+    exactVersion: 3.15.1
   Citadel:
     url: https://github.com/orlandos-nl/Citadel
     # 0.12.x requires swift-crypto >=3.12.3 (compatible with our 4.5.2 pin).
@@ -46,7 +46,7 @@ targets:
       - package: swift-crypto
         product: Crypto
       - package: swift-crypto
-        product: CryptoExtras
+        product: _CryptoExtras
       - package: Citadel
         product: Citadel
 
@@ -60,7 +60,7 @@ targets:
       - package: swift-crypto
         product: Crypto
       - package: swift-crypto
-        product: CryptoExtras
+        product: _CryptoExtras
       - package: Citadel
         product: Citadel
       - package: SwiftTerm
@@ -81,7 +81,7 @@ targets:
       - package: swift-crypto
         product: Crypto
       - package: swift-crypto
-        product: CryptoExtras
+        product: _CryptoExtras
       - package: Citadel
         product: Citadel
 

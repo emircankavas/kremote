@@ -1,6 +1,6 @@
 import Foundation
 import Crypto
-import CryptoExtras
+import _CryptoExtras
 
 /// mRemoteNG's password encryption, reimplemented from the documented format.
 ///
