@@ -8,14 +8,19 @@ options:
   groupSortPosition: top
 
 packages:
+  # KRemoteCore is a real local SwiftPM package, not an XcodeGen `library.static`
+  # target: Citadel -> NIOCore -> swift-atomics ships a C module (`_AtomicsShims`)
+  # whose module map Xcode fails to propagate into a generated static-library
+  # target ("missing required module '_AtomicsShims'"). SwiftPM resolves it.
+  KRemoteCore:
+    path: Packages/KRemoteCore
   swift-crypto:
     url: https://github.com/apple/swift-crypto
-    # Must stay <4.0.0: Citadel pins swift-crypto to 3.12.3..<4.0.0.
-    # Named "CryptoExtras" only from 4.x; in 3.x the product is "_CryptoExtras".
+    # Must stay <4.0.0 (Citadel pins 3.12.3..<4.0.0); in 3.x the extras product
+    # is named "_CryptoExtras", not "CryptoExtras".
     exactVersion: 3.15.1
   Citadel:
     url: https://github.com/orlandos-nl/Citadel
-    # 0.12.x requires swift-crypto >=3.12.3 (compatible with our 4.5.2 pin).
     exactVersion: 0.12.1
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
@@ -37,26 +42,14 @@ settings:
     GENERATE_INFOPLIST_FILE: "NO"
 
 targets:
-  KRemoteCore:
-    type: library.static
-    platform: macOS
-    sources:
-      - path: Sources/KRemoteCore
-    dependencies:
-      - package: swift-crypto
-        product: Crypto
-      - package: swift-crypto
-        product: _CryptoExtras
-      - package: Citadel
-        product: Citadel
-
   KRemote:
     type: application
     platform: macOS
     sources:
       - path: Sources/KRemote
     dependencies:
-      - target: KRemoteCore
+      - package: KRemoteCore
+        product: KRemoteCore
       - package: swift-crypto
         product: Crypto
       - package: swift-crypto
@@ -71,20 +64,6 @@ targets:
         PRODUCT_NAME: KRemote
         INFOPLIST_FILE: Info.plist
 
-  KRemoteCoreTests:
-    type: bundle.unit-test
-    platform: macOS
-    sources:
-      - path: Tests/KRemoteCoreTests
-    dependencies:
-      - target: KRemoteCore
-      - package: swift-crypto
-        product: Crypto
-      - package: swift-crypto
-        product: _CryptoExtras
-      - package: Citadel
-        product: Citadel
-
 schemes:
   KRemote:
     build:
@@ -94,7 +73,5 @@ schemes:
       config: Debug
     test:
       config: Debug
-      targets:
-        - KRemoteCoreTests
     archive:
       config: Release

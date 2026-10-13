@@ -44,19 +44,11 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
-      - name: Test
+      - name: Test (core package)
         run: |
           set -o pipefail
-          xcodebuild \
-            -project KRemote.xcodeproj \
-            -scheme KRemote \
-            -configuration Debug \
-            -destination 'platform=macOS' \
-            -derivedDataPath build \
-            -skipPackagePluginValidation \
-            -skipMacroValidation \
-            CODE_SIGNING_ALLOWED=NO \
-            test
+          cd Packages/KRemoteCore
+          swift test
 
       - name: Package .app
         run: |

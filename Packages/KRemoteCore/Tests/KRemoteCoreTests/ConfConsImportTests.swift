@@ -4,8 +4,8 @@ import XCTest
 final class ConfConsImportTests: XCTestCase {
 
     private func fixtureData() throws -> Data {
-        let bundle = Bundle(for: ConfConsImportTests.self)
-        guard let url = bundle.url(forResource: "confCons-demo", withExtension: "xml") else {
+        // SwiftPM test target: resources come from the package bundle.
+        guard let url = Bundle.module.url(forResource: "confCons-demo", withExtension: "xml") else {
             XCTFail("Fixture confCons-demo.xml missing from test bundle")
             throw XCTSkip("fixture missing")
         }

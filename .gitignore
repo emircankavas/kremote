@@ -4,9 +4,12 @@
 
 # Build products
 build/
-DerivedData/
 .build/
 .build-xcode/
+DerivedData/
+
+# SwiftPM checkouts for the local package
+Packages/KRemoteCore/.build/
 
 # Xcode user state
 xcuserdata/
