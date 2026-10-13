@@ -8,14 +8,25 @@ public struct SSHCommandBuilder {
     public var host: String
     public var port: Int
     public var username: String
-    /// Empty = let ssh prompt (or use keys/agent/config). Never put a password in argv:
-    /// argv is world-readable via `ps`. Passwords are written to the PTY instead.
+    /// Path to a private key; empty means let ssh pick (config/agent/default keys).
+    public var identityFile: String
+    /// Command to run on connect instead of an interactive shell.
+    public var remoteCommand: String
     public var additionalOptions: [String]
 
-    public init(host: String, port: Int = 22, username: String = "", additionalOptions: [String] = []) {
+    public init(
+        host: String,
+        port: Int = 22,
+        username: String = "",
+        identityFile: String = "",
+        remoteCommand: String = "",
+        additionalOptions: [String] = []
+    ) {
         self.host = host
         self.port = port
         self.username = username
+        self.identityFile = identityFile
+        self.remoteCommand = remoteCommand
         self.additionalOptions = additionalOptions
     }
 
@@ -29,10 +40,21 @@ public struct SSHCommandBuilder {
         if port > 0, port != 22 {
             args += ["-p", String(port)]
         }
+        let key = identityFile.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !key.isEmpty {
+            args += ["-i", (key as NSString).expandingTildeInPath]
+        }
         args += additionalOptions
 
         let target = username.isEmpty ? host : "\(username)@\(host)"
         args.append(target)
+
+        // A remote command must come after the destination. Quoting keeps it a
+        // single argv entry so ssh hands it to the shell intact.
+        let command = remoteCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !command.isEmpty {
+            args.append(command)
+        }
         return args
     }
 

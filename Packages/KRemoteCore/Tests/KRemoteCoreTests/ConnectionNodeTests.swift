@@ -45,6 +45,18 @@ final class ConnectionNodeTests: XCTestCase {
         XCTAssertEqual(effective?.password, "secret")
     }
 
+    func testIdentityFileAndRemoteCommandInherit() {
+        let root = ConnectionNode(kind: .folder, name: "Corp", identityFile: "~/.ssh/id_corp")
+        let middle = ConnectionNode(kind: .folder, name: "Team", remoteCommand: "tmux attach")
+        let leaf = ConnectionNode(kind: .connection, name: "host", host: "h", identityFile: "/override/id")
+        middle.children = [leaf]
+        root.children = [middle]
+
+        let effective = ConnectionNode.effective(for: leaf.id, in: [root])
+        XCTAssertEqual(effective?.identityFile, "/override/id", "leaf overrides the folder's key")
+        XCTAssertEqual(effective?.remoteCommand, "tmux attach", "command inherited from the middle folder")
+    }
+
     func testFolderItselfResolvesToInheritedDefaults() {
         let folder = ConnectionNode(kind: .folder, name: "Empty")
         let effective = ConnectionNode.effective(for: folder.id, in: [folder])

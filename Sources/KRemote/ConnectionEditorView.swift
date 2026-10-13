@@ -46,8 +46,12 @@ struct ConnectionEditorView: View {
                         TextField("Protocol", text: $draft.protocolName, prompt: Text(inheritedProtocolPlaceholder))
                         TextField("Port", value: $draft.port, format: .number, prompt: Text(inheritedPortPlaceholder))
                             .frame(maxWidth: 140)
+                        TextField("Identity File", text: $draft.identityFile, prompt: Text(inheritedIdentityPlaceholder))
+                            .help("Private key passed as ssh -i. Blank means ssh picks (config, agent or default keys).")
                         SecureField("Password", text: $draft.password)
                             .help("Stored in the macOS Keychain, never written to disk as plain text.")
+                        TextField("Remote Command", text: $draft.remoteCommand, prompt: Text(inheritedCommandPlaceholder))
+                            .help("Run this instead of an interactive shell. Blank means a normal shell.")
                     }
                 }
             }
@@ -102,6 +106,12 @@ struct ConnectionEditorView: View {
     }
     private var inheritedPortPlaceholder: String {
         draft.port == 0 ? "\(inherited?.port ?? 22)" : ""
+    }
+    private var inheritedIdentityPlaceholder: String {
+        draft.identityFile.isEmpty ? (inherited?.identityFile ?? "") : ""
+    }
+    private var inheritedCommandPlaceholder: String {
+        draft.remoteCommand.isEmpty ? (inherited?.remoteCommand ?? "") : ""
     }
 
     // MARK: - Actions

@@ -117,6 +117,8 @@ struct SessionView: View {
                     port: effective?.port ?? 22,
                     username: effective?.username ?? "",
                     password: effective?.password ?? "",
+                    identityFile: effective?.identityFile ?? "",
+                    remoteCommand: effective?.remoteCommand ?? "",
                     onStateChange: { state = $0 },
                     onTitleChange: { model.updateTitle(session.id, title: $0) }
                 )

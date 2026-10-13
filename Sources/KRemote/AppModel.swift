@@ -197,6 +197,8 @@ final class AppModel {
         node.port = draft.port
         node.username = draft.username.trimmingCharacters(in: .whitespacesAndNewlines)
         node.protocolName = draft.protocolName.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        node.identityFile = draft.identityFile.trimmingCharacters(in: .whitespacesAndNewlines)
+        node.remoteCommand = draft.remoteCommand.trimmingCharacters(in: .whitespacesAndNewlines)
         node.password = draft.password
 
         do {

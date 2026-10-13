@@ -25,6 +25,12 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
     /// can carry protocols the model doesn't know about yet.
     public var protocolName: String
 
+    /// Path to a private key (`ssh -i`). Empty means inherit.
+    public var identityFile: String = ""
+    /// Command to run on connect instead of an interactive shell. Empty = inherit
+    /// (and ultimately an interactive shell).
+    public var remoteCommand: String = ""
+
     /// Directly-set password. Deliberately **not** in `CodingKeys`: it is never
     /// written to the JSON tree. `AppModel` mirrors it into the Keychain.
     public var password: String = ""
@@ -33,6 +39,7 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case id, kind, name, host, port, username, protocolName, children
+        case identityFile, remoteCommand
     }
 
     public init(
@@ -43,6 +50,8 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
         port: Int = 0,
         username: String = "",
         protocolName: String = "",
+        identityFile: String = "",
+        remoteCommand: String = "",
         password: String = "",
         children: [ConnectionNode] = []
     ) {
@@ -53,6 +62,8 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
         self.port = port
         self.username = username
         self.protocolName = protocolName
+        self.identityFile = identityFile
+        self.remoteCommand = remoteCommand
         self.password = password
         self.children = children
     }
@@ -75,19 +86,25 @@ public struct EffectiveConnection: Equatable, Sendable {
     public var username: String
     public var protocolName: String
     public var password: String
+    public var identityFile: String
+    public var remoteCommand: String
 
     public init(
         host: String = "",
         port: Int = 22,
         username: String = "",
         protocolName: String = "SSH",
-        password: String = ""
+        password: String = "",
+        identityFile: String = "",
+        remoteCommand: String = ""
     ) {
         self.host = host
         self.port = port
         self.username = username
         self.protocolName = protocolName
         self.password = password
+        self.identityFile = identityFile
+        self.remoteCommand = remoteCommand
     }
 
     /// What a root node starts from before any folder contributes.
@@ -110,7 +127,9 @@ extension ConnectionNode {
             port: port == 0 ? base.port : port,
             username: username.isEmpty ? base.username : username,
             protocolName: protocolName.isEmpty ? base.protocolName : protocolName,
-            password: password.isEmpty ? base.password : password
+            password: password.isEmpty ? base.password : password,
+            identityFile: identityFile.isEmpty ? base.identityFile : identityFile,
+            remoteCommand: remoteCommand.isEmpty ? base.remoteCommand : remoteCommand
         )
     }
 
@@ -229,6 +248,8 @@ public struct ConnectionDraft: Equatable {
     public var port: Int
     public var username: String
     public var protocolName: String
+    public var identityFile: String
+    public var remoteCommand: String
     public var password: String
 
     public init(
@@ -238,6 +259,8 @@ public struct ConnectionDraft: Equatable {
         port: Int = 0,
         username: String = "",
         protocolName: String = "",
+        identityFile: String = "",
+        remoteCommand: String = "",
         password: String = ""
     ) {
         self.id = id
@@ -246,6 +269,8 @@ public struct ConnectionDraft: Equatable {
         self.port = port
         self.username = username
         self.protocolName = protocolName
+        self.identityFile = identityFile
+        self.remoteCommand = remoteCommand
         self.password = password
     }
 
@@ -257,6 +282,8 @@ public struct ConnectionDraft: Equatable {
             port: node.port,
             username: node.username,
             protocolName: node.protocolName,
+            identityFile: node.identityFile,
+            remoteCommand: node.remoteCommand,
             password: node.password
         )
     }

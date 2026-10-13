@@ -43,6 +43,40 @@ final class SSHCommandBuilderTests: XCTestCase {
         }
     }
 
+    func testIdentityFileBecomesDashI() {
+        let args = SSHCommandBuilder(host: "h", username: "u", identityFile: "/keys/id_ed25519").arguments
+        let index = args.firstIndex(of: "-i")
+        XCTAssertNotNil(index)
+        if let index { XCTAssertEqual(args[index + 1], "/keys/id_ed25519") }
+    }
+
+    func testIdentityFileExpandsTilde() {
+        let args = SSHCommandBuilder(host: "h", identityFile: "~/.ssh/id_ed25519").arguments
+        let value = args[args.firstIndex(of: "-i")! + 1]
+        XCTAssertFalse(value.hasPrefix("~"))
+        XCTAssertTrue(value.hasSuffix("/.ssh/id_ed25519"))
+    }
+
+    func testBlankIdentityFileAddsNoFlag() {
+        XCTAssertFalse(SSHCommandBuilder(host: "h", identityFile: "   ").arguments.contains("-i"))
+    }
+
+    func testRemoteCommandGoesAfterDestination() {
+        let args = SSHCommandBuilder(host: "h", username: "u", remoteCommand: "tmux attach").arguments
+        let destinationIndex = args.firstIndex(of: "u@h")
+        let commandIndex = args.firstIndex(of: "tmux attach")
+        XCTAssertNotNil(destinationIndex)
+        XCTAssertNotNil(commandIndex)
+        if let destinationIndex, let commandIndex {
+            XCTAssertGreaterThan(commandIndex, destinationIndex)
+        }
+    }
+
+    func testBlankRemoteCommandAddsNothing() {
+        let args = SSHCommandBuilder(host: "h", remoteCommand: "  ").arguments
+        XCTAssertEqual(args.last, "h")
+    }
+
     func testPasswordPromptDetection() {
         XCTAssertTrue(SSHPtySession.looksLikePasswordPrompt("ansibleAdmin@10.0.31.11's password:"))
         XCTAssertTrue(SSHPtySession.looksLikePasswordPrompt("Password: "))

@@ -11,11 +11,20 @@ struct TerminalSessionView: NSViewRepresentable {
     let port: Int
     let username: String
     let password: String
+    let identityFile: String
+    let remoteCommand: String
     let onStateChange: @MainActor (SSHPtySession.State) -> Void
     let onTitleChange: @MainActor (String) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(host: host, port: port, username: username, password: password)
+        Coordinator(
+            host: host,
+            port: port,
+            username: username,
+            password: password,
+            identityFile: identityFile,
+            remoteCommand: remoteCommand
+        )
     }
 
     func makeNSView(context: Context) -> TerminalView {
@@ -43,16 +52,27 @@ struct TerminalSessionView: NSViewRepresentable {
         private let port: Int
         private let username: String
         private let password: String
+        private let identityFile: String
+        private let remoteCommand: String
 
         private weak var view: TerminalView?
         private var session: SSHPtySession?
         private var onTitleChange: (@MainActor (String) -> Void)?
 
-        init(host: String, port: Int, username: String, password: String) {
+        init(
+            host: String,
+            port: Int,
+            username: String,
+            password: String,
+            identityFile: String,
+            remoteCommand: String
+        ) {
             self.host = host
             self.port = port
             self.username = username
             self.password = password
+            self.identityFile = identityFile
+            self.remoteCommand = remoteCommand
         }
 
         func attach(
@@ -78,7 +98,13 @@ struct TerminalSessionView: NSViewRepresentable {
             let terminal = view.getTerminal()
             let columns = max(2, terminal.cols)
             let rows = max(2, terminal.rows)
-            let command = SSHCommandBuilder(host: host, port: port, username: username)
+            let command = SSHCommandBuilder(
+                host: host,
+                port: port,
+                username: username,
+                identityFile: identityFile,
+                remoteCommand: remoteCommand
+            )
 
             // SwiftUI may not hand keyboard focus to an NSViewRepresentable.
             // Make the terminal first responder once it is in a window so keys
