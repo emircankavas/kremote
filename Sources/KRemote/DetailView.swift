@@ -30,55 +30,21 @@ private struct TabStrip: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        HStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 2) {
-                    ForEach(model.sessions) { session in
-                        TabButton(session: session, isActive: session.id == model.activeSessionID) {
-                            model.activateTab(session.id)
-                        } onClose: {
-                            model.closeSession(session.id)
-                        }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+                ForEach(model.sessions) { session in
+                    TabButton(session: session, isActive: session.id == model.activeSessionID) {
+                        model.activateTab(session.id)
+                    } onClose: {
+                        model.closeSession(session.id)
                     }
                 }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 4)
             }
-            Divider().frame(height: 22)
-            toolbar
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
         }
         .frame(height: 34)
         .background(.bar)
-    }
-
-    private var toolbar: some View {
-        HStack(spacing: 6) {
-            Button {
-                model.requestRoot()
-            } label: {
-                Image(systemName: "number")
-            }
-            .help("Become root on the focused session (runs sudo -i)")
-            .disabled(model.focusedSession == nil)
-
-            Button {
-                model.setSplit(!model.splitMode, panes: model.splitMode ? nil : 2)
-            } label: {
-                Image(systemName: "square.split.2x1")
-            }
-            .help(model.splitMode ? "Exit split view" : "Split into two panes")
-            .disabled(model.sessions.count < 2 && !model.splitMode)
-
-            if model.splitMode {
-                ForEach(2...PaneLayout.maximum, id: \.self) { count in
-                    Button("\(count)") { model.setPaneCount(count) }
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
-                        .tint(count == model.tiles.count ? .accentColor : Color(nsColor: .controlColor))
-                }
-            }
-        }
-        .padding(.horizontal, 8)
     }
 }
 

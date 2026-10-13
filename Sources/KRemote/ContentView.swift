@@ -17,6 +17,12 @@ struct ContentView: View {
             DetailView()
         }
         .navigationTitle("KRemote")
+        .toolbar {
+            // These sit in the window's title bar, on the same line as "KRemote".
+            ToolbarItemGroup(placement: .primaryAction) {
+                SessionToolbarItems()
+            }
+        }
         .sheet(item: $model.editingNodeID) { id in
             ConnectionEditorView(nodeID: id) { model.editingNodeID = nil }
         }
@@ -75,6 +81,36 @@ struct ContentView: View {
 /// Lets `sheet(item:)` accept a plain `UUID` node id.
 extension UUID: @retroactive Identifiable {
     public var id: UUID { self }
+}
+
+/// The `#` (become root) and split-view controls, shown in the window title bar.
+struct SessionToolbarItems: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Button {
+            model.requestRoot()
+        } label: {
+            Image(systemName: "number")
+        }
+        .help("Become root on the focused session (runs sudo -i)")
+        .disabled(model.focusedSession == nil)
+
+        Button {
+            model.setSplit(!model.splitMode, panes: model.splitMode ? nil : 2)
+        } label: {
+            Image(systemName: model.splitMode ? "square.split.2x1.fill" : "square.split.2x1")
+        }
+        .help(model.splitMode ? "Exit split view" : "Split into two panes")
+        .disabled(model.sessions.count < 2 && !model.splitMode)
+
+        if model.splitMode {
+            ForEach(2...PaneLayout.maximum, id: \.self) { count in
+                Button("\(count)") { model.setPaneCount(count) }
+                    .help("\(count) panes")
+            }
+        }
+    }
 }
 
 #Preview {
