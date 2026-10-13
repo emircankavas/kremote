@@ -18,7 +18,7 @@ final class ConnectionNodeTests: XCTestCase {
     }
 
     func testLeafOverridesFolder() {
-        let folder = ConnectionNode(kind: .folder, name: "Prod", username: "deploy", port: 2222)
+        let folder = ConnectionNode(kind: .folder, name: "Prod", port: 2222, username: "deploy")
         let leaf = ConnectionNode(
             kind: .connection,
             name: "web-01",
