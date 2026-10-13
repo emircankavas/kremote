@@ -39,6 +39,8 @@ jobs:
             -configuration Debug \
             -destination 'platform=macOS' \
             -derivedDataPath build \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO \
             build
 
@@ -51,6 +53,8 @@ jobs:
             -configuration Debug \
             -destination 'platform=macOS' \
             -derivedDataPath build \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO \
             test
 
