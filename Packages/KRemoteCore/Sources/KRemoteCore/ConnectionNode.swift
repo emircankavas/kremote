@@ -182,6 +182,40 @@ extension ConnectionNode {
             return haystack.contains(needle)
         }
     }
+
+    /// True when `node` is `maybeAncestor` or sits somewhere beneath it. Moving a
+    /// node into its own subtree would detach that subtree from the tree.
+    public static func contains(_ maybeAncestor: UUID, _ node: UUID, in roots: [ConnectionNode]) -> Bool {
+        guard let ancestor = find(maybeAncestor, in: roots) else { return false }
+        if maybeAncestor == node { return true }
+        return find(node, in: ancestor.children) != nil
+    }
+
+    /// Moves `node` into `newParent` (nil = root). Returns false when the move is
+    /// impossible (missing node, self, or into its own descendant).
+    @discardableResult
+    public static func move(
+        _ node: UUID,
+        to newParent: UUID?,
+        in roots: inout [ConnectionNode]
+    ) -> Bool {
+        guard let moving = find(node, in: roots) else { return false }
+        if let newParent {
+            guard find(newParent, in: roots) != nil else { return false }
+            // Refuse to drop a node into itself or its own descendants.
+            if contains(node, newParent, in: roots) { return false }
+            // Only folders can hold children.
+            guard find(newParent, in: roots)?.isFolder == true else { return false }
+        }
+        // Detach first, then attach, so an existing parent link does not duplicate.
+        guard let detached = remove(node, from: &roots) else { return false }
+        if let newParent, let parent = find(newParent, in: roots) {
+            parent.children.append(detached)
+        } else {
+            roots.append(detached)
+        }
+        return true
+    }
 }
 
 // MARK: - Editing

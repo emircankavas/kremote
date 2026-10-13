@@ -165,6 +165,14 @@ final class AppModel {
         persist()
     }
 
+    /// Moves a node into a folder (nil = root). No-op when the move is invalid.
+    @discardableResult
+    func move(_ id: ConnectionNode.ID, toFolder folderID: ConnectionNode.ID?) -> Bool {
+        guard ConnectionNode.move(id, to: folderID, in: &roots) else { return false }
+        persist()
+        return true
+    }
+
     func delete(_ id: ConnectionNode.ID) {
         guard let removed = ConnectionNode.remove(id, from: &roots) else { return }
         for node in ConnectionNode.allNodes(in: [removed]) where !node.isFolder {

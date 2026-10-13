@@ -89,10 +89,30 @@ struct SidebarView: View {
                     NodeRow(node: node, effective: model.effective(node.id))
                         .tag(node.id)
                         .contextMenu { menu(for: node) }
+                        .draggable(node.id.uuidString) {
+                            Label(node.name, systemImage: node.isFolder ? "folder" : "terminal")
+                        }
+                        .dropDestination(for: String.self) { items, _ in
+                            drop(items, onto: node)
+                        }
                 }
             }
             .listStyle(.sidebar)
         }
+    }
+
+    /// Handles a drop of dragged node ids onto `target` (a folder nests them, a
+    /// connection sends them to that connection's parent folder).
+    private func drop(_ items: [String], onto target: ConnectionNode) -> Bool {
+        let destinationFolder = target.isFolder
+            ? target.id
+            : ConnectionNode.parentID(of: target.id, in: model.roots)
+        var movedAny = false
+        for uuidString in items {
+            guard let uuid = UUID(uuidString: uuidString) else { continue }
+            if model.move(uuid, toFolder: destinationFolder) { movedAny = true }
+        }
+        return movedAny
     }
 
     // MARK: - Alerts
