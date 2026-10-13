@@ -21,11 +21,13 @@ folders with attribute inheritance, tabbed sessions and direct import of
   remote shell's `OSC 0/2` title when it sets one.
 - Typing `exit` (or any clean shell exit) **closes the tab**; a failed connection
   keeps the tab open so the reason stays visible.
-- **Folders carry defaults for their children**: username, protocol, port,
-  identity file, password and remote command. A field left blank is inherited;
-  if nothing in the chain sets a port, the protocol decides it (443 for HTTPS,
-  3389 for RDP, 22 for SSH…). Host is meaningfully per-connection, so it stays on
-  the connection (a blank host inherits the folder's, but that is rarely useful).
+- **Folders carry credentials for their children**: username, identity file and
+  password. A blank credential field is inherited from the nearest folder that
+  sets it.
+- Host, protocol, port and remote command are **per-connection** — a folder
+  commonly mixes SSH, RDP and HTTPS children, so a protocol there would be wrong.
+  A blank port resolves to the connection's own protocol default (443 for HTTPS,
+  3389 for RDP, 22 for SSH…).
 - Only **SSH** connections can be opened; imported RDP/HTTPS/Telnet/VNC rows are
   stored and shown but open an "unsupported protocol" notice.
 
