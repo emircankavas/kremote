@@ -4,7 +4,22 @@ A native macOS multi-protocol remote connection client, with a connection tree,
 folders with attribute inheritance, tabbed sessions and direct import of
 `confCons.xml` files produced by [mRemoteNG](https://github.com/mRemoteNG/mRemoteNG).
 
-**Status:** early — Faz 3 (SSH sessions). SSH is the only implemented protocol.
+**Status:** early — Faz 4 (editor & UX). SSH is the only implemented protocol.
+
+## Editor & UX
+
+- **Connection editor** (⌘E, or right-click ▸ Edit): name, host, port, username,
+  protocol, **identity file** (`ssh -i`), Keychain password and an optional
+  **remote command**. Every field inherits from the parent folder when left blank;
+  the resolved value shows as the field's placeholder.
+- **Search** the tree from the sidebar field — matches name, host, username and
+  protocol, showing each hit's folder path.
+- **Drag & drop** to move connections and folders between folders (cycles refused).
+- **Tabs stay live**: switching tabs does not drop a session — every open session
+  keeps its ssh process. Right-click a connection for **Open in New Tab**.
+- **Reconnect** button appears when a session drops; the tab title follows the
+  remote shell's `OSC 0/2` title when it sets one.
+
 
 ## SSH sessions
 
