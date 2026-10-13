@@ -98,7 +98,7 @@ struct SessionView: View {
     @Environment(AppModel.self) private var model
     let session: Session
 
-    @State private var state: SSHSessionController.State = .idle
+    @State private var state: SSHPtySession.State = .idle
 
     var body: some View {
         VStack(spacing: 0) {
@@ -107,7 +107,6 @@ struct SessionView: View {
             if let node = model.find(session.nodeID) {
                 let effective = model.effective(node.id)
                 TerminalSessionView(
-                    nodeID: node.id,
                     host: effective?.host ?? "",
                     port: effective?.port ?? 22,
                     username: effective?.username ?? "",

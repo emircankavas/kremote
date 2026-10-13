@@ -3,19 +3,18 @@ import AppKit
 import SwiftTerm
 import KRemoteCore
 
-/// Bridges a SwiftTerm `TerminalView` to an `SSHSessionController`:
-/// keystrokes go to the SSH channel, channel output is fed to the emulator,
-/// and terminal resizes are reported back to the server.
+/// Bridges a SwiftTerm `TerminalView` to an `SSHPtySession`:
+/// keystrokes go to the ssh process, its output is fed to the emulator, and
+/// terminal resizes are reported back over the PTY.
 struct TerminalSessionView: NSViewRepresentable {
-    let nodeID: ConnectionNode.ID
     let host: String
     let port: Int
     let username: String
     let password: String
-    let onStateChange: @MainActor (SSHSessionController.State) -> Void
+    let onStateChange: @MainActor (SSHPtySession.State) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(nodeID: nodeID, host: host, port: port, username: username, password: password)
+        Coordinator(host: host, port: port, username: username, password: password)
     }
 
     func makeNSView(context: Context) -> TerminalView {
@@ -25,9 +24,7 @@ struct TerminalSessionView: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ view: TerminalView, context: Context) {
-        // Nothing to do: the session owns its own state once started.
-    }
+    func updateNSView(_ view: TerminalView, context: Context) {}
 
     static func dismantleNSView(_ view: TerminalView, coordinator: Coordinator) {
         coordinator.stop()
@@ -37,27 +34,25 @@ struct TerminalSessionView: NSViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, TerminalViewDelegate {
-        private let nodeID: ConnectionNode.ID
         private let host: String
         private let port: Int
         private let username: String
         private let password: String
 
         private weak var view: TerminalView?
-        private var controller: SSHSessionController?
+        private var session: SSHPtySession?
 
-        init(nodeID: ConnectionNode.ID, host: String, port: Int, username: String, password: String) {
-            self.nodeID = nodeID
+        init(host: String, port: Int, username: String, password: String) {
             self.host = host
             self.port = port
             self.username = username
             self.password = password
         }
 
-        func attach(view: TerminalView, onStateChange: @escaping @MainActor (SSHSessionController.State) -> Void) {
+        func attach(view: TerminalView, onStateChange: @escaping @MainActor (SSHPtySession.State) -> Void) {
             self.view = view
 
-            let controller = SSHSessionController(
+            let session = SSHPtySession(
                 onOutput: { [weak view] data in
                     Task { @MainActor in
                         view?.feed(byteArray: ArraySlice([UInt8](data)))
@@ -67,50 +62,36 @@ struct TerminalSessionView: NSViewRepresentable {
                     Task { @MainActor in onStateChange(state) }
                 }
             )
-            self.controller = controller
+            self.session = session
 
-            let (columns, rows) = Self.size(of: view)
-            Task {
-                await controller.connect(
-                    host: host,
-                    port: port,
-                    username: username,
-                    password: password,
-                    columns: columns,
-                    rows: rows
-                )
-            }
+            let terminal = view.getTerminal()
+            let columns = max(2, terminal.cols)
+            let rows = max(2, terminal.rows)
+            let command = SSHCommandBuilder(host: host, port: port, username: username)
+
+            session.start(command: command, password: password, columns: columns, rows: rows)
         }
 
         func stop() {
-            guard let controller else { return }
-            Task { await controller.disconnect() }
-            self.controller = nil
-        }
-
-        private static func size(of view: TerminalView) -> (Int, Int) {
-            let columns = max(2, view.getTerminal().cols)
-            let rows = max(2, view.getTerminal().rows)
-            return (columns, rows)
+            session?.disconnect()
+            session = nil
         }
 
         // MARK: TerminalViewDelegate
         //
-        // SwiftTerm's delegate protocol is nonisolated, but we are @MainActor. All
-        // callbacks here are in fact delivered on the main thread, so `nonisolated`
-        // plus `MainActor.assumeIsolated` is the correct bridge — no hop needed.
+        // SwiftTerm's delegate protocol is nonisolated, but we are @MainActor. The
+        // callbacks are delivered on the main thread, so `nonisolated` plus
+        // `MainActor.assumeIsolated` is the correct bridge — no hop needed.
 
         nonisolated func send(source: TerminalView, data: ArraySlice<UInt8>) {
             MainActor.assumeIsolated {
-                guard let controller else { return }
-                Task { await controller.send(Data(data)) }
+                session?.send(Data(data))
             }
         }
 
         nonisolated func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
             MainActor.assumeIsolated {
-                guard let controller else { return }
-                Task { await controller.resize(columns: newCols, rows: newRows) }
+                session?.resize(columns: newCols, rows: newRows)
             }
         }
 
@@ -123,9 +104,7 @@ struct TerminalSessionView: NSViewRepresentable {
         nonisolated func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
 
         nonisolated func bell(source: TerminalView) {
-            MainActor.assumeIsolated {
-                NSSound.beep()
-            }
+            MainActor.assumeIsolated { NSSound.beep() }
         }
 
         nonisolated func clipboardCopy(source: TerminalView, content: Data) {

@@ -9,19 +9,14 @@ options:
 
 packages:
   # KRemoteCore is a real local SwiftPM package, not an XcodeGen `library.static`
-  # target: Citadel -> NIOCore -> swift-atomics ships a C module (`_AtomicsShims`)
-  # whose module map Xcode fails to propagate into a generated static-library
-  # target ("missing required module '_AtomicsShims'"). SwiftPM resolves it.
+  # target: Xcode fails to propagate C module maps into generated static-library
+  # targets. It carries only swift-crypto (mRemoteNG confCons format); SSH runs
+  # the system `ssh` on a PTY, so no SSH library is linked.
   KRemoteCore:
     path: Packages/KRemoteCore
   swift-crypto:
     url: https://github.com/apple/swift-crypto
-    # Must stay <4.0.0 (Citadel pins 3.12.3..<4.0.0); in 3.x the extras product
-    # is named "_CryptoExtras", not "CryptoExtras".
     exactVersion: 3.15.1
-  Citadel:
-    url: https://github.com/orlandos-nl/Citadel
-    exactVersion: 0.12.1
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
     # 1.20.0 (tools 6.0); newer tags declare tools 6.2, unsupported by the CI Xcode.
@@ -54,8 +49,6 @@ targets:
         product: Crypto
       - package: swift-crypto
         product: _CryptoExtras
-      - package: Citadel
-        product: Citadel
       - package: SwiftTerm
         product: SwiftTerm
     settings:

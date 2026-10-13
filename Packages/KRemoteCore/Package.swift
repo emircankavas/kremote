@@ -2,10 +2,11 @@
 import PackageDescription
 
 // KRemoteCore is a real local SwiftPM package rather than an XcodeGen-generated
-// target on purpose. Citadel -> NIOCore -> swift-atomics ships a C module
-// (`_AtomicsShims`) whose module map Xcode does not propagate into a
-// `library.static` target, which fails with "missing required module
-// '_AtomicsShims'". Building the core through SwiftPM resolves it.
+// target on purpose: Xcode does not propagate C module maps (e.g. swift-atomics'
+// _AtomicsShims, pulled in by network libraries) into a `library.static` target.
+// Building the core through SwiftPM sidesteps that.
+// SSH is done by running the system `ssh` on a PTY (see SSHPtySession), so no
+// SSH library is needed — only swift-crypto, for the mRemoteNG confCons format.
 let package = Package(
     name: "KRemoteCore",
     platforms: [
@@ -16,7 +17,6 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-crypto", exact: "3.15.1"),
-        .package(url: "https://github.com/orlandos-nl/Citadel", exact: "0.12.1"),
     ],
     targets: [
         .target(
@@ -24,7 +24,6 @@ let package = Package(
             dependencies: [
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "_CryptoExtras", package: "swift-crypto"),
-                .product(name: "Citadel", package: "Citadel"),
             ]
         ),
         .testTarget(
