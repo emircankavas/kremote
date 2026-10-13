@@ -12,9 +12,11 @@ import Darwin
 /// stacks (e.g. NIOSSH) implement only publickey/password and cannot reach those.
 /// This is the same choice mRemoteNXT and Royal TSX make.
 ///
-/// Threading: `forkpty` spawns the child; a dedicated queue reads the master fd
-/// (blocking) and reports bytes; writes and window-size changes go back out the
-/// same fd. All callbacks are `@Sendable` and expected to hop to their own actor.
+/// Threading: `forkpty` spawns the child. Output is drained on a dedicated
+/// **serial** `readQueue` that only ever reads (it blocks in `read`); input,
+/// resize and teardown go on a separate serial `ioQueue` that only ever writes or
+/// issues ioctls. Keeping reads and writes on separate queues is essential — if
+/// they shared one queue, the blocking read would starve every keystroke.
 public final class SSHPtySession: @unchecked Sendable {
 
     public enum State: Equatable, Sendable {
@@ -27,8 +29,17 @@ public final class SSHPtySession: @unchecked Sendable {
     private let onOutput: @Sendable (Data) -> Void
     private let onStateChange: @Sendable (State) -> Void
 
-    private let queue = DispatchQueue(label: "com.emircankavas.kremote.pty")
-    private var masterFD: Int32 = -1
+    private let readQueue = DispatchQueue(label: "com.emircankavas.kremote.pty.read")
+    private let ioQueue = DispatchQueue(label: "com.emircankavas.kremote.pty.io")
+
+    // Guarded by `fdLock`: the fd is written on ioQueue/start and read on readQueue.
+    private let fdLock = NSLock()
+    private var _masterFD: Int32 = -1
+    private var masterFD: Int32 {
+        get { fdLock.withLock { _masterFD } }
+        set { fdLock.withLock { _masterFD = newValue } }
+    }
+
     private var childPID: pid_t = -1
     private var connectedReported = false
     private var passwordSent = false
@@ -56,8 +67,10 @@ public final class SSHPtySession: @unchecked Sendable {
         self.password = password
         onStateChange(.connecting)
 
-        queue.async { [self] in
-            var winsize = winsize(
+        // Spawning (which can block briefly) goes on ioQueue; the read loop then
+        // takes over readQueue for the session's lifetime.
+        ioQueue.async { [self] in
+            var winSize = winsize(
                 ws_row: UInt16(max(2, rows)),
                 ws_col: UInt16(max(2, columns)),
                 ws_xpixel: 0,
@@ -65,40 +78,42 @@ public final class SSHPtySession: @unchecked Sendable {
             )
 
             var master: Int32 = -1
-            let args = command.arguments
-            let exec = Self.sshPath
-
-            guard let pid = Self.fork(andExec: exec, args: args, windowSize: &winsize, master: &master) else {
+            guard let pid = Self.fork(
+                andExec: Self.sshPath,
+                args: command.arguments,
+                windowSize: &winSize,
+                master: &master
+            ) else {
                 onStateChange(.disconnected("Could not start ssh (forkpty failed)."))
-                return
-            }
-
-            if pid == 0 {
-                // Child: forkpty already replaced stdio with the slave PTY.
                 return
             }
 
             masterFD = master
             childPID = pid
-            readLoop()
 
-            // readLoop returns on EOF/child exit.
-            var status: Int32 = 0
-            _ = waitpid(pid, &status, 0)
-            let reason = Self.describeExit(status)
-            cleanup()
-            onStateChange(.disconnected(reason))
+            readQueue.async { [self] in
+                readLoop()
+
+                var status: Int32 = 0
+                _ = waitpid(pid, &status, 0)
+                let reason = Self.describeExit(status)
+                cleanup()
+                onStateChange(.disconnected(reason))
+            }
         }
     }
 
     private func readLoop() {
         let bufferSize = 16 * 1024
         var buffer = [UInt8](repeating: 0, count: bufferSize)
-        // A small rolling tail to spot the password prompt across chunk boundaries.
+        // Rolling tail to spot the password prompt across chunk boundaries.
         var tail = Data()
 
-        while masterFD >= 0 {
-            let count = read(masterFD, &buffer, bufferSize)
+        while true {
+            let fd = masterFD
+            if fd < 0 { break }
+
+            let count = read(fd, &buffer, bufferSize)
             if count > 0 {
                 let data = Data(bytes: buffer, count: count)
                 onOutput(data)
@@ -132,16 +147,17 @@ public final class SSHPtySession: @unchecked Sendable {
     // MARK: - Input / resize
 
     public func send(_ data: Data) {
-        queue.async { [self] in write(data) }
+        ioQueue.async { [self] in write(data) }
     }
 
     private func write(_ data: Data) {
-        guard masterFD >= 0 else { return }
+        let fd = masterFD
+        guard fd >= 0 else { return }
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
             var offset = 0
             while offset < raw.count {
-                let n = Darwin.write(masterFD, base + offset, raw.count - offset)
+                let n = Darwin.write(fd, base + offset, raw.count - offset)
                 if n > 0 { offset += n }
                 else if errno == EINTR { continue }
                 else { break }
@@ -150,23 +166,25 @@ public final class SSHPtySession: @unchecked Sendable {
     }
 
     public func resize(columns: Int, rows: Int) {
-        queue.async { [self] in
-            guard masterFD >= 0 else { return }
+        ioQueue.async { [self] in
+            let fd = masterFD
+            guard fd >= 0 else { return }
             var ws = winsize(
                 ws_row: UInt16(max(2, rows)),
                 ws_col: UInt16(max(2, columns)),
                 ws_xpixel: 0,
                 ws_ypixel: 0
             )
-            _ = ioctl(masterFD, TIOCSWINSZ, &ws)
+            _ = ioctl(fd, TIOCSWINSZ, &ws)
         }
     }
 
     public func disconnect() {
-        queue.async { [self] in
-            if childPID > 0 {
-                kill(childPID, SIGHUP)
-                kill(childPID, SIGKILL)
+        ioQueue.async { [self] in
+            let pid = childPID
+            if pid > 0 {
+                kill(pid, SIGHUP)
+                kill(pid, SIGKILL)
             }
             cleanup()
             onStateChange(.disconnected(nil))
@@ -174,8 +192,9 @@ public final class SSHPtySession: @unchecked Sendable {
     }
 
     private func cleanup() {
-        if masterFD >= 0 {
-            close(masterFD)
+        let fd = masterFD
+        if fd >= 0 {
+            close(fd)
             masterFD = -1
         }
         childPID = -1
@@ -197,14 +216,9 @@ public final class SSHPtySession: @unchecked Sendable {
     }
 
     private static func describeExit(_ status: Int32) -> String? {
-        guard let reason = WEXITSTATUS_EX(status) else { return nil }
-        return "ssh exited with status \(reason)"
-    }
-
-    private static func WEXITSTATUS_EX(_ status: Int32) -> Int32? {
         // (status & 0x7f) == 0 means a normal exit; the code is in bits 8..15.
         if (status & 0x7f) == 0 {
-            return (status >> 8) & 0xff
+            return "ssh exited with status \((status >> 8) & 0xff)"
         }
         return nil
     }

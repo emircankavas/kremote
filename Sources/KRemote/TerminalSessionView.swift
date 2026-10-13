@@ -69,6 +69,14 @@ struct TerminalSessionView: NSViewRepresentable {
             let rows = max(2, terminal.rows)
             let command = SSHCommandBuilder(host: host, port: port, username: username)
 
+            // SwiftUI may not hand keyboard focus to an NSViewRepresentable.
+            // Make the terminal first responder once it is in a window so keys
+            // reach `send(source:data:)` at all.
+            DispatchQueue.main.async { [weak view] in
+                guard let view, let window = view.window else { return }
+                window.makeFirstResponder(view)
+            }
+
             session.start(command: command, password: password, columns: columns, rows: rows)
         }
 
