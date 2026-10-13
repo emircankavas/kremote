@@ -125,13 +125,14 @@ public enum ConfConsCrypto {
         try encrypt(Data(plaintext.utf8), passphrase: passphrase, iterations: iterations, hash: hash)
     }
 
-    private static func randomBytes(_ count: Int) -> Data {
+    /// Default-argument expressions are inlined at the call site, so this must be
+    /// at least as accessible as `encrypt`.
+    public static func randomBytes(_ count: Int) -> Data {
         var bytes = [UInt8](repeating: 0, count: count)
         for index in bytes.indices { bytes[index] = UInt8.random(in: .min ... .max) }
         return Data(bytes)
     }
 }
-
 extension ConfConsCrypto {
     /// Whether `passphrase` is the correct master password for this file.
     ///

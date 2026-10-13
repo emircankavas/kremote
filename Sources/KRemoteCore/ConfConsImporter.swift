@@ -6,7 +6,7 @@ import Foundation
 /// code or assets are used). See `ConfConsCrypto` for the password scheme.
 public enum ConfConsImporter {
 
-    public struct ImportResult: Sendable {
+    public struct ImportResult {
         public var roots: [ConnectionNode]
         /// Node ids in `roots` mapped to their decrypted password, so the caller
         /// can push them into the Keychain.
