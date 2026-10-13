@@ -19,6 +19,16 @@ folders with attribute inheritance, tabbed sessions and direct import of
   keeps its ssh process. Right-click a connection for **Open in New Tab**.
 - **Reconnect** button appears when a session drops; the tab title follows the
   remote shell's `OSC 0/2` title when it sets one.
+- Typing `exit` (or any clean shell exit) **closes the tab**; a failed connection
+  keeps the tab open so the reason stays visible.
+- **Folders carry defaults for their children**: username, protocol, port,
+  identity file, password and remote command. A field left blank is inherited;
+  if nothing in the chain sets a port, the protocol decides it (443 for HTTPS,
+  3389 for RDP, 22 for SSH…). Host is meaningfully per-connection, so it stays on
+  the connection (a blank host inherits the folder's, but that is rarely useful).
+- Only **SSH** connections can be opened; imported RDP/HTTPS/Telnet/VNC rows are
+  stored and shown but open an "unsupported protocol" notice.
+
 
 
 ## SSH sessions
