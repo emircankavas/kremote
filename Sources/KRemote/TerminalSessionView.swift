@@ -3,25 +3,14 @@ import AppKit
 import SwiftTerm
 import KRemoteCore
 
-/// A `TerminalView` that reports when it gains focus, so split mode knows which
-/// pane is active.
-final class FocusingTerminalView: TerminalView {
-    var onFocus: (() -> Void)?
-
-    override func becomeFirstResponder() -> Bool {
-        let result = super.becomeFirstResponder()
-        if result { onFocus?() }
-        return result
-    }
-}
-
 /// Bridges a SwiftTerm `TerminalView` to an `SSHPtySession`:
 /// keystrokes go to the ssh process, its output is fed to the emulator, and
 /// terminal resizes are reported back over the PTY.
 ///
-/// `inputRequests` is a small counter the parent bumps to ask the terminal to
-/// write a command (e.g. `sudo -i`) to the shell; `onInputRequestHandled` fires
-/// afterward so the parent can reset its flag.
+/// `inputRequests` is a counter the parent bumps to ask the terminal to write a
+/// command (e.g. `sudo -i`) to the shell; `onInputRequestHandled` fires afterward.
+/// Focus is reported via a local mouse monitor, because SwiftTerm's
+/// `becomeFirstResponder` is not `open` and cannot be overridden.
 struct TerminalSessionView: NSViewRepresentable {
     let host: String
     let port: Int
@@ -30,9 +19,7 @@ struct TerminalSessionView: NSViewRepresentable {
     let identityFile: String
     let remoteCommand: String
 
-    /// Monotonic counter; each change writes `pendingInput` to the shell.
     var inputRequests: Int = 0
-    /// The text written when `inputRequests` changes (usually one command + "\n").
     var pendingInput: String = ""
 
     let onStateChange: @MainActor (SSHPtySession.State) -> Void
@@ -51,17 +38,17 @@ struct TerminalSessionView: NSViewRepresentable {
         )
     }
 
-    func makeNSView(context: Context) -> FocusingTerminalView {
-        let view = FocusingTerminalView(frame: .zero)
+    func makeNSView(context: Context) -> TerminalView {
+        let view = TerminalView(frame: .zero)
         view.terminalDelegate = context.coordinator
-        view.onFocus = { onFocus() }
         context.coordinator.attach(view: view, onStateChange: onStateChange, onTitleChange: onTitleChange)
+        context.coordinator.installFocusMonitor(view: view, onFocus: onFocus)
         context.coordinator.lastInputRequest = inputRequests
         return view
     }
 
-    func updateNSView(_ view: FocusingTerminalView, context: Context) {
-        view.onFocus = { onFocus() }
+    func updateNSView(_ view: TerminalView, context: Context) {
+        context.coordinator.updateFocusHandler(onFocus)
         if inputRequests != context.coordinator.lastInputRequest {
             context.coordinator.lastInputRequest = inputRequests
             if !pendingInput.isEmpty {
@@ -71,7 +58,7 @@ struct TerminalSessionView: NSViewRepresentable {
         }
     }
 
-    static func dismantleNSView(_ view: FocusingTerminalView, coordinator: Coordinator) {
+    static func dismantleNSView(_ view: TerminalView, coordinator: Coordinator) {
         coordinator.stop()
     }
 
@@ -89,8 +76,9 @@ struct TerminalSessionView: NSViewRepresentable {
         private weak var view: TerminalView?
         private var session: SSHPtySession?
         private var onTitleChange: (@MainActor (String) -> Void)?
+        private var focusMonitor: Any?
+        private var onFocus: (@MainActor () -> Void)?
 
-        /// Last `inputRequests` value seen, so a change can be detected.
         var lastInputRequest = 0
 
         init(
@@ -107,6 +95,21 @@ struct TerminalSessionView: NSViewRepresentable {
             self.password = password
             self.identityFile = identityFile
             self.remoteCommand = remoteCommand
+        }
+
+        func installFocusMonitor(view: TerminalView, onFocus: @escaping @MainActor () -> Void) {
+            self.onFocus = onFocus
+            // A click anywhere in this terminal means it is the active pane.
+            focusMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak view] event in
+                if let view, event.window === view.window, view.bounds.contains(view.convert(event.locationInWindow, from: nil)) {
+                    Task { @MainActor in onFocus() }
+                }
+                return event
+            }
+        }
+
+        func updateFocusHandler(_ handler: @escaping @MainActor () -> Void) {
+            self.onFocus = handler
         }
 
         func attach(
@@ -155,15 +158,15 @@ struct TerminalSessionView: NSViewRepresentable {
         }
 
         func stop() {
+            if let focusMonitor {
+                NSEvent.removeMonitor(focusMonitor)
+                self.focusMonitor = nil
+            }
             session?.disconnect()
             session = nil
         }
 
         // MARK: TerminalViewDelegate
-        //
-        // SwiftTerm's delegate protocol is nonisolated, but we are @MainActor. The
-        // callbacks are delivered on the main thread, so `nonisolated` plus
-        // `MainActor.assumeIsolated` is the correct bridge — no hop needed.
 
         nonisolated func send(source: TerminalView, data: ArraySlice<UInt8>) {
             MainActor.assumeIsolated {
