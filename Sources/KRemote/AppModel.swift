@@ -2,12 +2,27 @@ import Foundation
 import Observation
 import KRemoteCore
 
-/// An open remote session. Faz 1 only records that a tab exists; Faz 3 attaches
-/// a live SSH transport + terminal view to it.
+/// An open remote session: one live SSH connection shown in a tab.
 struct Session: Identifiable, Hashable {
-    let id = UUID()
+    let id: UUID
     let nodeID: ConnectionNode.ID
+    /// User-facing name (falls back to the node name; may be replaced by the
+    /// remote title via OSC 0/2).
     var title: String
+    /// Set from the terminal's title escape; nil = keep `title`.
+    var remoteTitle: String?
+    /// Bumped to force the terminal view to be torn down and rebuilt — used by
+    /// "Reconnect" to start a fresh ssh process.
+    var generation: Int
+
+    init(id: UUID = UUID(), nodeID: ConnectionNode.ID, title: String, generation: Int = 0) {
+        self.id = id
+        self.nodeID = nodeID
+        self.title = title
+        self.generation = generation
+    }
+
+    var displayTitle: String { remoteTitle ?? title }
 
     static func == (lhs: Session, rhs: Session) -> Bool { lhs.id == rhs.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
@@ -107,6 +122,15 @@ final class AppModel {
     /// Settings of a node with folders' values folded in.
     func effective(_ id: ConnectionNode.ID) -> EffectiveConnection? {
         ConnectionNode.effective(for: id, in: roots)
+    }
+
+    /// Search results for the sidebar filter; empty query means "not filtering".
+    var searchQuery: String = ""
+    var isSearching: Bool {
+        !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    var searchResults: [ConnectionNode] {
+        ConnectionNode.search(searchQuery, in: roots)
     }
 
     // MARK: - Mutations
@@ -231,17 +255,31 @@ final class AppModel {
 
     // MARK: - Sessions
 
-    /// Opens (or focuses) a session for a connection leaf.
-    func open(_ node: ConnectionNode) {
+    /// Opens a session for a connection leaf. When `newTab` is false and the
+    /// connection already has a tab, that tab is focused instead.
+    func open(_ node: ConnectionNode, newTab: Bool = false) {
         guard !node.isFolder else { return }
-        // One tab per connection for now; Faz 4 adds "open in new tab".
-        if let existing = sessions.first(where: { $0.nodeID == node.id }) {
+        if !newTab, let existing = sessions.first(where: { $0.nodeID == node.id }) {
             activeSessionID = existing.id
             return
         }
         let session = Session(nodeID: node.id, title: node.name)
         sessions.append(session)
         activeSessionID = session.id
+    }
+
+    /// Tears down and restarts the ssh process for a session.
+    func reconnect(_ id: Session.ID) {
+        guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
+        sessions[index].generation += 1
+        sessions[index].remoteTitle = nil
+    }
+
+    /// Applies a title pushed by the remote shell (OSC 0/2).
+    func updateTitle(_ id: Session.ID, title: String) {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let index = sessions.firstIndex(where: { $0.id == id }) else { return }
+        sessions[index].remoteTitle = trimmed
     }
 
     func closeSession(_ id: Session.ID) {

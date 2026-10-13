@@ -12,8 +12,14 @@ struct DetailView: View {
             VStack(spacing: 0) {
                 TabStrip()
                 Divider()
-                if let session = model.activeSession {
-                    SessionView(session: session)
+                // Keep EVERY session in the hierarchy (just hide the inactive
+                // ones) so switching tabs does not tear down its ssh process.
+                ZStack {
+                    ForEach(model.sessions) { session in
+                        SessionView(session: session)
+                            .opacity(session.id == model.activeSessionID ? 1 : 0)
+                            .allowsHitTesting(session.id == model.activeSessionID)
+                    }
                 }
             }
         }
@@ -54,7 +60,7 @@ private struct TabButton: View {
         HStack(spacing: 6) {
             Image(systemName: "terminal")
                 .font(.caption)
-            Text(session.title)
+            Text(session.displayTitle)
                 .lineLimit(1)
             Button(action: onClose) {
                 Image(systemName: "xmark")
@@ -111,8 +117,11 @@ struct SessionView: View {
                     port: effective?.port ?? 22,
                     username: effective?.username ?? "",
                     password: effective?.password ?? "",
-                    onStateChange: { state = $0 }
+                    onStateChange: { state = $0 },
+                    onTitleChange: { model.updateTitle(session.id, title: $0) }
                 )
+                // A new generation rebuilds the view → a fresh ssh process.
+                .id(session.generation)
             } else {
                 Text("Connection no longer exists.")
                     .foregroundStyle(.secondary)
@@ -137,10 +146,19 @@ struct SessionView: View {
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
+            if isDisconnected {
+                Button("Reconnect") { model.reconnect(session.id) }
+                    .controlSize(.small)
+            }
         }
         .padding(.horizontal, 10)
-        .frame(height: 26)
+        .frame(height: 28)
         .background(.bar)
+    }
+
+    private var isDisconnected: Bool {
+        if case .disconnected = state { return true }
+        return false
     }
 
     private var statusColor: Color {

@@ -12,6 +12,7 @@ struct TerminalSessionView: NSViewRepresentable {
     let username: String
     let password: String
     let onStateChange: @MainActor (SSHPtySession.State) -> Void
+    let onTitleChange: @MainActor (String) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(host: host, port: port, username: username, password: password)
@@ -20,7 +21,11 @@ struct TerminalSessionView: NSViewRepresentable {
     func makeNSView(context: Context) -> TerminalView {
         let view = TerminalView(frame: .zero)
         view.terminalDelegate = context.coordinator
-        context.coordinator.attach(view: view, onStateChange: onStateChange)
+        context.coordinator.attach(
+            view: view,
+            onStateChange: onStateChange,
+            onTitleChange: onTitleChange
+        )
         return view
     }
 
@@ -41,6 +46,7 @@ struct TerminalSessionView: NSViewRepresentable {
 
         private weak var view: TerminalView?
         private var session: SSHPtySession?
+        private var onTitleChange: (@MainActor (String) -> Void)?
 
         init(host: String, port: Int, username: String, password: String) {
             self.host = host
@@ -49,8 +55,13 @@ struct TerminalSessionView: NSViewRepresentable {
             self.password = password
         }
 
-        func attach(view: TerminalView, onStateChange: @escaping @MainActor (SSHPtySession.State) -> Void) {
+        func attach(
+            view: TerminalView,
+            onStateChange: @escaping @MainActor (SSHPtySession.State) -> Void,
+            onTitleChange: @escaping @MainActor (String) -> Void
+        ) {
             self.view = view
+            self.onTitleChange = onTitleChange
 
             let session = SSHPtySession(
                 onOutput: { [weak view] data in
@@ -103,7 +114,11 @@ struct TerminalSessionView: NSViewRepresentable {
             }
         }
 
-        nonisolated func setTerminalTitle(source: TerminalView, title: String) {}
+        nonisolated func setTerminalTitle(source: TerminalView, title: String) {
+            MainActor.assumeIsolated {
+                onTitleChange?(title)
+            }
+        }
 
         nonisolated func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
 

@@ -167,6 +167,21 @@ extension ConnectionNode {
         }
         return nil
     }
+
+    /// Nodes in depth-first order whose own fields match `query`
+    /// (case-insensitive substring over name, host, username, protocol).
+    /// Resolved inherited values are deliberately not searched — only what the
+    /// node itself carries, so results point at where the value actually lives.
+    public static func search(_ query: String, in roots: [ConnectionNode]) -> [ConnectionNode] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return [] }
+        return allNodes(in: roots).filter { node in
+            let haystack = [node.name, node.host, node.username, node.protocolName]
+                .joined(separator: "\n")
+                .lowercased()
+            return haystack.contains(needle)
+        }
+    }
 }
 
 // MARK: - Editing
