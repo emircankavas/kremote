@@ -60,7 +60,39 @@ final class ConnectionNodeTests: XCTestCase {
     func testFolderItselfResolvesToInheritedDefaults() {
         let folder = ConnectionNode(kind: .folder, name: "Empty")
         let effective = ConnectionNode.effective(for: folder.id, in: [folder])
-        XCTAssertEqual(effective, .default)
+        XCTAssertEqual(effective?.port, 22)
+        XCTAssertEqual(effective?.protocolName, "SSH")
+    }
+
+    func testPortDefaultsToProtocolWhenNothingSetsIt() {
+        // A folder carrying only a protocol should give its connections the
+        // protocol's own default port, not SSH's 22.
+        let folder = ConnectionNode(kind: .folder, name: "Web", protocolName: "HTTPS")
+        let leaf = ConnectionNode(kind: .connection, name: "ilot", host: "10.0.0.9")
+        folder.children = [leaf]
+
+        let effective = ConnectionNode.effective(for: leaf.id, in: [folder])
+        XCTAssertEqual(effective?.protocolName, "HTTPS")
+        XCTAssertEqual(effective?.port, 443, "HTTPS should default to 443, not 22")
+    }
+
+    func testExplicitPortStillWins() {
+        let folder = ConnectionNode(kind: .folder, name: "Web", protocolName: "HTTPS", port: 8443)
+        let leaf = ConnectionNode(kind: .connection, name: "ilot", host: "h")
+        folder.children = [leaf]
+        XCTAssertEqual(ConnectionNode.effective(for: leaf.id, in: [folder])?.port, 8443)
+    }
+
+    func testLeafPortOverridesProtocolDefault() {
+        let leaf = ConnectionNode(kind: .connection, name: "x", host: "h", port: 2222, protocolName: "HTTPS")
+        XCTAssertEqual(ConnectionNode.effective(for: leaf.id, in: [leaf])?.port, 2222)
+    }
+
+    func testSupportsSSH() {
+        XCTAssertTrue(ConnectionNode(kind: .connection, name: "a", protocolName: "SSH2").supportsSSH)
+        XCTAssertTrue(ConnectionNode(kind: .connection, name: "b", protocolName: "").supportsSSH)
+        XCTAssertFalse(ConnectionNode(kind: .connection, name: "c", protocolName: "RDP").supportsSSH)
+        XCTAssertFalse(ConnectionNode(kind: .connection, name: "d", protocolName: "HTTPS").supportsSSH)
     }
 
     // MARK: - Tree operations

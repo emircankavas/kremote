@@ -128,9 +128,9 @@ struct SidebarView: View {
     private func deleteMessage(for id: ConnectionNode.ID) -> String {
         guard let node = model.find(id) else { return "" }
         if node.isFolder, !node.children.isEmpty {
-            return "\"\\(node.name)\" and its \\(node.children.count) item(s) will be removed."
+            return "\"\(node.name)\" and its \(node.children.count) item(s) will be removed."
         }
-        return "\"\\(node.name)\" will be removed."
+        return "\"\(node.name)\" will be removed."
     }
 
     private func beginRename(_ node: ConnectionNode) {

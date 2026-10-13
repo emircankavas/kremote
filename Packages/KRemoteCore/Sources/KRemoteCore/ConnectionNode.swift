@@ -104,6 +104,13 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
 
     public var isFolder: Bool { kind == .folder }
 
+    /// Whether KRemote can actually open a session for this leaf's resolved
+    /// protocol. Only SSH-family protocols are implemented; the rest are imported
+    /// and stored so the tree round-trips, but have no session yet.
+    public var supportsSSH: Bool {
+        RemoteProtocol(protocolName.isEmpty ? "SSH" : protocolName).isSSHFamily
+    }
+
     /// Optional-typed children for SwiftUI's `OutlineGroup`; nil marks a leaf.
     public var childNodes: [ConnectionNode]? { isFolder ? children : nil }
 
@@ -122,6 +129,11 @@ public struct EffectiveConnection: Equatable, Sendable {
     public var password: String
     public var identityFile: String
     public var remoteCommand: String
+
+    /// Internal: whether any node in the chain set a port explicitly. When none
+    /// did, the port falls back to the protocol's own default (443 for HTTPS,
+    /// 3389 for RDP, …) rather than SSH's 22.
+    var portWasSet: Bool = false
 
     public init(
         host: String = "",
@@ -156,15 +168,26 @@ extension ConnectionNode {
     /// Folds this node's directly-set values over what it inherited.
     public func effective(inheriting parent: EffectiveConnection?) -> EffectiveConnection {
         let base = parent ?? .default
-        return EffectiveConnection(
+        let resolvedProtocol = protocolName.isEmpty ? base.protocolName : protocolName
+
+        var result = EffectiveConnection(
             host: host.isEmpty ? base.host : host,
             port: port == 0 ? base.port : port,
             username: username.isEmpty ? base.username : username,
-            protocolName: protocolName.isEmpty ? base.protocolName : protocolName,
+            protocolName: resolvedProtocol,
             password: password.isEmpty ? base.password : password,
             identityFile: identityFile.isEmpty ? base.identityFile : identityFile,
             remoteCommand: remoteCommand.isEmpty ? base.remoteCommand : remoteCommand
         )
+
+        // A port set anywhere down the chain wins. When nothing set one, use the
+        // protocol's default so a "HTTPS" connection does not land on 22.
+        result.portWasSet = port != 0 || base.portWasSet
+        if !result.portWasSet {
+            let protocolDefault = RemoteProtocol(resolvedProtocol).defaultPort
+            if protocolDefault > 0 { result.port = protocolDefault }
+        }
+        return result
     }
 
     /// Resolved settings for a node somewhere in `roots`, or nil if not found.

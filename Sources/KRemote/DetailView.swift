@@ -110,7 +110,7 @@ struct SessionView: View {
         VStack(spacing: 0) {
             statusBar
             Divider()
-            if let node = model.find(session.nodeID) {
+            if let node = model.find(session.nodeID), node.supportsSSH {
                 let effective = model.effective(node.id)
                 TerminalSessionView(
                     host: effective?.host ?? "",
@@ -119,11 +119,22 @@ struct SessionView: View {
                     password: effective?.password ?? "",
                     identityFile: effective?.identityFile ?? "",
                     remoteCommand: effective?.remoteCommand ?? "",
-                    onStateChange: { state = $0 },
+                    onStateChange: { newState in
+                        // Ignore callbacks from a torn-down generation (a stale
+                        // ssh process reporting "disconnected" after Reconnect).
+                        guard model.currentGeneration(of: session.id) == session.generation else { return }
+                        state = newState
+                        if case .disconnected(let reason) = newState, reason == nil {
+                            // Clean exit (`exit` / logout): close the tab.
+                            model.closeSession(session.id)
+                        }
+                    },
                     onTitleChange: { model.updateTitle(session.id, title: $0) }
                 )
                 // A new generation rebuilds the view → a fresh ssh process.
                 .id(session.generation)
+            } else if let node = model.find(session.nodeID) {
+                UnsupportedProtocolView(name: node.name, protocolName: model.effective(node.id)?.protocolName ?? "")
             } else {
                 Text("Connection no longer exists.")
                     .foregroundStyle(.secondary)
@@ -181,5 +192,27 @@ struct SessionView: View {
             if let reason, !reason.isEmpty { return "Disconnected — \(reason)" }
             return "Disconnected"
         }
+    }
+}
+
+/// Shown for a connection whose protocol KRemote cannot open yet.
+private struct UnsupportedProtocolView: View {
+    let name: String
+    let protocolName: String
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 40, weight: .light))
+                .foregroundStyle(.orange)
+            Text(name).font(.title3)
+            Text("\(protocolName.isEmpty ? "This protocol" : protocolName) is not supported yet. Only SSH sessions can be opened.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.background)
     }
 }

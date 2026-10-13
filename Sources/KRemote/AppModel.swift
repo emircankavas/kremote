@@ -288,6 +288,12 @@ final class AppModel {
         sessions[index].remoteTitle = nil
     }
 
+    /// Current generation of a session, used to ignore state callbacks that
+    /// arrive from a terminal view that has already been torn down.
+    func currentGeneration(of id: Session.ID) -> Int? {
+        sessions.first { $0.id == id }?.generation
+    }
+
     /// Applies a title pushed by the remote shell (OSC 0/2).
     func updateTitle(_ id: Session.ID, title: String) {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)

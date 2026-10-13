@@ -216,11 +216,12 @@ public final class SSHPtySession: @unchecked Sendable {
     }
 
     private static func describeExit(_ status: Int32) -> String? {
-        // (status & 0x7f) == 0 means a normal exit; the code is in bits 8..15.
-        if (status & 0x7f) == 0 {
-            return "ssh exited with status \((status >> 8) & 0xff)"
-        }
-        return nil
+        // A normal exit (code 0) is the user typing `exit` — report no reason so
+        // the UI can close the tab. Anything else (including ssh's 255 for a
+        // connection error) is kept as a reason the tab stays open to display.
+        guard (status & 0x7f) == 0 else { return nil }
+        let code = (status >> 8) & 0xff
+        return code == 0 ? nil : "ssh exited with status \(code)"
     }
 
     /// fork + exec on a new PTY (the forkpty(3) pattern).
