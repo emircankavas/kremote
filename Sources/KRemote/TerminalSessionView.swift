@@ -95,44 +95,56 @@ struct TerminalSessionView: NSViewRepresentable {
         }
 
         // MARK: TerminalViewDelegate
+        //
+        // SwiftTerm's delegate protocol is nonisolated, but we are @MainActor. All
+        // callbacks here are in fact delivered on the main thread, so `nonisolated`
+        // plus `MainActor.assumeIsolated` is the correct bridge — no hop needed.
 
-        func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            guard let controller else { return }
-            Task { await controller.send(Data(data)) }
-        }
-
-        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            guard let controller else { return }
-            Task { await controller.resize(columns: newCols, rows: newRows) }
-        }
-
-        func setTerminalTitle(source: TerminalView, title: String) {
-            // Could surface the remote title in the tab; ignored for now.
-        }
-
-        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
-
-        func scrolled(source: TerminalView, position: Double) {}
-
-        func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
-
-        func bell(source: TerminalView) {
-            NSSound.beep()
-        }
-
-        func clipboardCopy(source: TerminalView, content: Data) {
-            if let text = String(data: content, encoding: .utf8) {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(text, forType: .string)
+        nonisolated func send(source: TerminalView, data: ArraySlice<UInt8>) {
+            MainActor.assumeIsolated {
+                guard let controller else { return }
+                Task { await controller.send(Data(data)) }
             }
         }
 
-        func clipboardRead(source: TerminalView) -> Data? {
-            NSPasteboard.general.string(forType: .string).map { Data($0.utf8) }
+        nonisolated func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+            MainActor.assumeIsolated {
+                guard let controller else { return }
+                Task { await controller.resize(columns: newCols, rows: newRows) }
+            }
         }
 
-        func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
+        nonisolated func setTerminalTitle(source: TerminalView, title: String) {}
 
-        func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+        nonisolated func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+
+        nonisolated func scrolled(source: TerminalView, position: Double) {}
+
+        nonisolated func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
+
+        nonisolated func bell(source: TerminalView) {
+            MainActor.assumeIsolated {
+                NSSound.beep()
+            }
+        }
+
+        nonisolated func clipboardCopy(source: TerminalView, content: Data) {
+            MainActor.assumeIsolated {
+                if let text = String(data: content, encoding: .utf8) {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }
+            }
+        }
+
+        nonisolated func clipboardRead(source: TerminalView) -> Data? {
+            MainActor.assumeIsolated {
+                NSPasteboard.general.string(forType: .string).map { Data($0.utf8) }
+            }
+        }
+
+        nonisolated func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
+
+        nonisolated func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
     }
 }
