@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import KRemoteCore
 
 struct ContentView: View {
     @Environment(AppModel.self) private var model
