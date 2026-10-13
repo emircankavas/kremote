@@ -37,6 +37,16 @@ struct KRemoteApp: App {
                 }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
             }
+            CommandMenu("Session") {
+                Button("Toggle Split View") {
+                    model.setSplit(!model.splitMode, panes: model.splitMode ? nil : 2)
+                }
+                .keyboardShortcut("d", modifiers: .command)
+                Divider()
+                ForEach(2...PaneLayout.maximum, id: \.self) { count in
+                    Button("\(count) Panes") { model.setSplit(true, panes: count) }
+                }
+            }
         }
     }
 }

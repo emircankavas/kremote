@@ -3,9 +3,25 @@ import AppKit
 import SwiftTerm
 import KRemoteCore
 
+/// A `TerminalView` that reports when it gains focus, so split mode knows which
+/// pane is active.
+final class FocusingTerminalView: TerminalView {
+    var onFocus: (() -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        let result = super.becomeFirstResponder()
+        if result { onFocus?() }
+        return result
+    }
+}
+
 /// Bridges a SwiftTerm `TerminalView` to an `SSHPtySession`:
 /// keystrokes go to the ssh process, its output is fed to the emulator, and
 /// terminal resizes are reported back over the PTY.
+///
+/// `inputRequests` is a small counter the parent bumps to ask the terminal to
+/// write a command (e.g. `sudo -i`) to the shell; `onInputRequestHandled` fires
+/// afterward so the parent can reset its flag.
 struct TerminalSessionView: NSViewRepresentable {
     let host: String
     let port: Int
@@ -13,8 +29,16 @@ struct TerminalSessionView: NSViewRepresentable {
     let password: String
     let identityFile: String
     let remoteCommand: String
+
+    /// Monotonic counter; each change writes `pendingInput` to the shell.
+    var inputRequests: Int = 0
+    /// The text written when `inputRequests` changes (usually one command + "\n").
+    var pendingInput: String = ""
+
     let onStateChange: @MainActor (SSHPtySession.State) -> Void
     let onTitleChange: @MainActor (String) -> Void
+    var onFocus: @MainActor () -> Void = {}
+    var onInputRequestHandled: @MainActor () -> Void = {}
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -27,20 +51,27 @@ struct TerminalSessionView: NSViewRepresentable {
         )
     }
 
-    func makeNSView(context: Context) -> TerminalView {
-        let view = TerminalView(frame: .zero)
+    func makeNSView(context: Context) -> FocusingTerminalView {
+        let view = FocusingTerminalView(frame: .zero)
         view.terminalDelegate = context.coordinator
-        context.coordinator.attach(
-            view: view,
-            onStateChange: onStateChange,
-            onTitleChange: onTitleChange
-        )
+        view.onFocus = { onFocus() }
+        context.coordinator.attach(view: view, onStateChange: onStateChange, onTitleChange: onTitleChange)
+        context.coordinator.lastInputRequest = inputRequests
         return view
     }
 
-    func updateNSView(_ view: TerminalView, context: Context) {}
+    func updateNSView(_ view: FocusingTerminalView, context: Context) {
+        view.onFocus = { onFocus() }
+        if inputRequests != context.coordinator.lastInputRequest {
+            context.coordinator.lastInputRequest = inputRequests
+            if !pendingInput.isEmpty {
+                context.coordinator.write(pendingInput)
+            }
+            onInputRequestHandled()
+        }
+    }
 
-    static func dismantleNSView(_ view: TerminalView, coordinator: Coordinator) {
+    static func dismantleNSView(_ view: FocusingTerminalView, coordinator: Coordinator) {
         coordinator.stop()
     }
 
@@ -58,6 +89,9 @@ struct TerminalSessionView: NSViewRepresentable {
         private weak var view: TerminalView?
         private var session: SSHPtySession?
         private var onTitleChange: (@MainActor (String) -> Void)?
+
+        /// Last `inputRequests` value seen, so a change can be detected.
+        var lastInputRequest = 0
 
         init(
             host: String,
@@ -107,14 +141,17 @@ struct TerminalSessionView: NSViewRepresentable {
             )
 
             // SwiftUI may not hand keyboard focus to an NSViewRepresentable.
-            // Make the terminal first responder once it is in a window so keys
-            // reach `send(source:data:)` at all.
             DispatchQueue.main.async { [weak view] in
                 guard let view, let window = view.window else { return }
                 window.makeFirstResponder(view)
             }
 
             session.start(command: command, password: password, columns: columns, rows: rows)
+        }
+
+        /// Writes raw text to the ssh process (used for the root command).
+        func write(_ text: String) {
+            session?.send(Data(text.utf8))
         }
 
         func stop() {

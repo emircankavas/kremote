@@ -268,17 +268,108 @@ final class AppModel {
 
     // MARK: - Sessions
 
+    /// Whether the detail area shows one session or a 2–4 pane split.
+    var splitMode = false
+    /// The visible panes (nil = empty). Length is 1 (normal) or 2–4 (split).
+    private(set) var tiles: [Session.ID?] = [nil]
+    /// Which pane has keyboard focus in split mode.
+    var focusedTile = 0
+
+    var paneLayout: PaneLayout {
+        PaneLayout(count: splitMode ? tiles.count : 1)
+    }
+
+    /// Turns split mode on with `count` panes (clamped 2…4) or off.
+    func setSplit(_ split: Bool, panes: Int? = nil) {
+        if split {
+            let target = min(max(panes ?? max(2, tiles.count), 2), PaneLayout.maximum)
+            if tiles.count != target {
+                tiles = PaneTiling.reconcile(
+                    existing: tiles,
+                    sessionIDs: sessions.map(\.id),
+                    paneCount: target
+                )
+            }
+            // Always show the active tab somewhere.
+            if let active = activeSessionID, PaneTiling.tile(of: active, in: tiles) == nil {
+                PaneTiling.place(session: active, in: &tiles, focusedTile: focusedTile)
+            }
+            splitMode = true
+        } else {
+            splitMode = false
+            if let active = activeSessionID {
+                tiles = [active]
+            } else {
+                tiles = [nil]
+            }
+            focusedTile = 0
+        }
+        reconcileTiles()
+    }
+
+    /// Changes the pane count while staying in split mode.
+    func setPaneCount(_ count: Int) {
+        guard splitMode else { return }
+        let clamped = min(max(count, 1), PaneLayout.maximum)
+        if clamped <= 1 { setSplit(false); return }
+        tiles = PaneTiling.reconcile(existing: tiles, sessionIDs: sessions.map(\.id), paneCount: clamped)
+        // The focused tile may no longer exist after trimming.
+        focusedTile = min(focusedTile, tiles.count - 1)
+        reconcileTiles()
+    }
+
+    /// Assigns `session` to the focused tile (used when switching a pane).
+    func assign(_ session: Session.ID, toTile index: Int) {
+        guard tiles.indices.contains(index) else { return }
+        tiles[index] = session
+        reconcileTiles()
+    }
+
+    func focusTile(_ index: Int) {
+        guard tiles.indices.contains(index) else { return }
+        focusedTile = index
+        if let session = tiles[index] { activeSessionID = session }
+    }
+
+    /// Which pane currently shows `session`, if any.
+    func tileIndex(of session: Session.ID) -> Int? {
+        tiles.firstIndex { $0 == session }
+    }
+
+    /// Re-runs the tiling rules against the current session list. Called after any
+    /// change that adds/removes sessions or changes the pane count.
+    private func reconcileTiles() {
+        let count = splitMode ? tiles.count : 1
+        tiles = PaneTiling.reconcile(existing: tiles, sessionIDs: sessions.map(\.id), paneCount: count)
+        if tiles.isEmpty { tiles = [nil] }
+        focusedTile = tiles.isEmpty ? 0 : min(max(focusedTile, 0), tiles.count - 1)
+    }
+
     /// Opens a session for a connection leaf. When `newTab` is false and the
     /// connection already has a tab, that tab is focused instead.
     func open(_ node: ConnectionNode, newTab: Bool = false) {
         guard !node.isFolder else { return }
         if !newTab, let existing = sessions.first(where: { $0.nodeID == node.id }) {
             activeSessionID = existing.id
+            focusTiledSession(existing.id)
             return
         }
         let session = Session(nodeID: node.id, title: node.name)
         sessions.append(session)
         activeSessionID = session.id
+        if splitMode {
+            PaneTiling.place(session: session.id, in: &tiles, focusedTile: focusedTile)
+            focusedTile = PaneTiling.tile(of: session.id, in: tiles) ?? focusedTile
+        } else {
+            tiles = [session.id]
+        }
+    }
+
+    /// Points split focus at the tile showing `session`, if it is visible.
+    private func focusTiledSession(_ session: Session.ID) {
+        if splitMode, let index = PaneTiling.tile(of: session, in: tiles) {
+            focusedTile = index
+        }
     }
 
     /// Tears down and restarts the ssh process for a session.
@@ -303,10 +394,16 @@ final class AppModel {
 
     func closeSession(_ id: Session.ID) {
         guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
+        let wasActiveTile = splitMode ? tiles.indices.contains(focusedTile) && tiles[focusedTile] == id : true
         sessions.remove(at: index)
         if activeSessionID == id {
             let next = min(index, sessions.count - 1)
             activeSessionID = sessions.isEmpty ? nil : sessions[next].id
+        }
+        reconcileTiles()
+        // If the closed session was the focused pane, focus whatever took its place.
+        if wasActiveTile, let active = activeSessionID, splitMode {
+            focusedTile = PaneTiling.tile(of: active, in: tiles) ?? focusedTile
         }
     }
 
@@ -314,4 +411,18 @@ final class AppModel {
         guard let activeSessionID else { return nil }
         return sessions.first { $0.id == activeSessionID }
     }
+
+    // MARK: - Elevation
+
+    /// The session shown in the focused pane (where `sudo -i` runs). Falls back to
+    /// the active session, so it also works in single-pane mode.
+    var focusedSession: Session? {
+        if splitMode, tiles.indices.contains(focusedTile), let id = tiles[focusedTile] {
+            return sessions.first { $0.id == id }
+        }
+        return activeSession
+    }
+
+    /// Command sent to the shell to become root; prompts for the password.
+    static let becomeRootCommand = "sudo -i"
 }
