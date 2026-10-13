@@ -11,14 +11,20 @@ folders with attribute inheritance, tabbed sessions and direct import of
 Double-click a connection (or right-click ▸ Open) to open a tab with a live
 interactive shell.
 
-- Transport: [Citadel](https://github.com/orlandos-nl/Citadel) (pure Swift, NIOSSH).
-- Terminal: [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) `TerminalView`.
-- Authentication uses the node's username + the **Keychain password** resolved
-  through folder inheritance — the passwords imported from mRemoteNG just work.
-- **Host keys**: trust-on-first-use, stored in
-  `~/Library/Application Support/KRemote/known_hosts.json`. First contact is
-  accepted and recorded; a later key change for the same host:port refuses the
-  connection (possible MITM). A user-facing "accept this key?" prompt is a TODO.
+- Transport: the **system `ssh` (OpenSSH) run on a PTY** (`forkpty`), not a
+  Swift SSH library. Terminal: SwiftTerm's `TerminalView`.
+- This is deliberate. OpenSSH already speaks every method a corporate server
+  may demand — `~/.ssh/config`, key files, `ssh-agent`, GSSAPI/Kerberos SSO,
+  keyboard-interactive, ProxyJump, ControlMaster. Pure-Swift stacks (NIOSSH /
+  Citadel) implement only publickey + password and cannot reach the rest, which
+  fails against hosts that rely on them. mRemoteNXT and Royal TSX both do it
+  this way.
+- Authentication therefore behaves exactly like your Terminal.app: keys, agent
+  and config "just work". If no key succeeds, a stored password is typed into
+  the PTY when ssh prompts (never into argv — argv is visible in `ps`).
+- Host-key trust is OpenSSH's own `~/.ssh/known_hosts`
+  (`StrictHostKeyChecking=accept-new`).
+
 
 ## mRemoteNG import
 
@@ -66,8 +72,8 @@ Sources/KRemote/       SwiftUI app: sidebar, tabs, editor sheet, SwiftTerm host
 ## Stack
 
 - Swift 6 + SwiftUI, macOS 15+, [XcodeGen](https://github.com/yonaskolb/XcodeGen)
-- [Citadel](https://github.com/orlandos-nl/Citadel) (MIT) — SSH client (NIOSSH)
 - [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) (MIT) — terminal emulation
+- SSH is the system `ssh`; no SSH library is linked.
 - No `.xcodeproj` in git; `project.yml` is the source of truth.
 
 ## Build
