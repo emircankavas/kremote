@@ -1,46 +1,65 @@
 import SwiftUI
 import KRemoteCore
 
-/// Right-hand side: the toolbar, the tab strip and the terminal area. The
-/// terminal area is one pane, or a 2–4 pane split.
+/// Right-hand side: the tab strip and the terminal area. The terminal area is one
+/// pane, or a 2–4 pane split.
+///
+/// Every session view is kept mounted for the whole lifetime of the session, keyed
+/// by a stable identity. Switching which session a pane shows therefore only
+/// changes visibility — it never tears down and rebuilds a terminal, which would
+/// otherwise leave a view attached to the previous session's ssh process.
 struct DetailView: View {
     @Environment(AppModel.self) private var model
-    /// Bumped to ask the focused terminal to run `sudo -i`.
-    @State private var rootRequest = 0
 
     var body: some View {
-        @Bindable var model = model
-
         if model.sessions.isEmpty {
             PlaceholderView()
         } else {
             VStack(spacing: 0) {
-                SessionToolbar(rootRequest: $rootRequest)
                 TabStrip()
                 Divider()
-                PaneGrid(rootRequest: rootRequest)
+                TerminalArea()
             }
         }
     }
 }
 
-// MARK: - Toolbar
+// MARK: - Tab strip (with the session toolbar on the right)
 
-private struct SessionToolbar: View {
+private struct TabStrip: View {
     @Environment(AppModel.self) private var model
-    @Binding var rootRequest: Int
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 2) {
+                    ForEach(model.sessions) { session in
+                        TabButton(session: session, isActive: session.id == model.activeSessionID) {
+                            model.activateTab(session.id)
+                        } onClose: {
+                            model.closeSession(session.id)
+                        }
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+            }
+            Divider().frame(height: 22)
+            toolbar
+        }
+        .frame(height: 34)
+        .background(.bar)
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 6) {
             Button {
-                rootRequest += 1
+                model.requestRoot()
             } label: {
                 Image(systemName: "number")
             }
             .help("Become root on the focused session (runs sudo -i)")
             .disabled(model.focusedSession == nil)
-
-            Divider().frame(height: 16)
 
             Button {
                 model.setSplit(!model.splitMode, panes: model.splitMode ? nil : 2)
@@ -51,47 +70,15 @@ private struct SessionToolbar: View {
             .disabled(model.sessions.count < 2 && !model.splitMode)
 
             if model.splitMode {
-                Text("Panes")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 ForEach(2...PaneLayout.maximum, id: \.self) { count in
                     Button("\(count)") { model.setPaneCount(count) }
                         .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .tint(count == model.tiles.count ? .accentColor : nil)
+                        .controlSize(.mini)
+                        .tint(count == model.tiles.count ? .accentColor : Color(nsColor: .controlColor))
                 }
             }
-
-            Spacer()
         }
         .padding(.horizontal, 8)
-        .frame(height: 32)
-        .background(.bar)
-    }
-}
-
-// MARK: - Tabs
-
-private struct TabStrip: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 2) {
-                ForEach(model.sessions) { session in
-                    TabButton(session: session, isActive: session.id == model.activeSessionID) {
-                        model.activeSessionID = session.id
-                        if model.splitMode { model.focusTile(0) }
-                    } onClose: {
-                        model.closeSession(session.id)
-                    }
-                }
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
-        }
-        .frame(height: 34)
-        .background(.bar)
     }
 }
 
@@ -129,93 +116,103 @@ private struct TabButton: View {
     }
 }
 
-// MARK: - Panes
+// MARK: - Terminal area
 
-private struct PaneGrid: View {
+private struct TerminalArea: View {
     @Environment(AppModel.self) private var model
-    let rootRequest: Int
+
+    private let gap: CGFloat = 1
 
     var body: some View {
-        if model.splitMode {
+        GeometryReader { geometry in
             let layout = model.paneLayout
-            VStack(spacing: 1) {
-                ForEach(0..<layout.rows, id: \.self) { row in
-                    HStack(spacing: 1) {
-                        ForEach(0..<layout.columns, id: \.self) { column in
-                            let index = row * layout.columns + column
-                            if index < model.tiles.count {
-                                PaneView(tileIndex: index, rootRequest: rootRequest)
-                            } else {
-                                Color(nsColor: .windowBackgroundColor)
-                            }
-                        }
+            let columns = layout.columns
+            let rows = layout.rows
+            let cellWidth = (geometry.size.width - gap * CGFloat(columns - 1)) / CGFloat(columns)
+            let cellHeight = (geometry.size.height - gap * CGFloat(rows - 1)) / CGFloat(rows)
+
+            ZStack(alignment: .topLeading) {
+                // Every session stays mounted for its whole life; only the ones in
+                // a pane are placed in a cell and shown. The rest are parked
+                // off-screen at 1x1 so their ssh process is untouched.
+                ForEach(model.sessions) { session in
+                    SessionContent(
+                        session: session,
+                        isFocused: focused(session),
+                        showPaneChrome: model.splitMode,
+                        onFocus: { model.focus(session.id) }
+                    )
+                    .frame(
+                        width: cellWidth(for: session, cellWidth: cellWidth),
+                        height: cellHeight(for: session, cellHeight: cellHeight)
+                    )
+                    .offset(offset(for: session, cellWidth: cellWidth, cellHeight: cellHeight, columns: columns))
+                    .opacity(isVisible(session) ? 1 : 0)
+                    .allowsHitTesting(isVisible(session))
+                }
+
+                // Empty panes sit on top of the parked views.
+                if model.splitMode {
+                    ForEach(emptyTileIndices, id: \.self) { index in
+                        EmptyPaneView(tileIndex: index)
+                            .frame(width: cellWidth, height: cellHeight)
+                            .offset(cellOffset(index, cellWidth: cellWidth, cellHeight: cellHeight, columns: columns))
                     }
                 }
             }
-            .background(Color(nsColor: .separatorColor))
-        } else {
-            PaneView(tileIndex: 0, rootRequest: rootRequest)
         }
+        .background(Color(nsColor: .windowBackgroundColor))
     }
-}
 
-private struct PaneView: View {
-    @Environment(AppModel.self) private var model
-    let tileIndex: Int
-    let rootRequest: Int
+    // MARK: - Placement
 
-    private var isFocused: Bool { model.focusedTile == tileIndex }
-
-    var body: some View {
-        let sessionID = model.tiles.indices.contains(tileIndex) ? model.tiles[tileIndex] : nil
-
-        VStack(spacing: 0) {
-            paneHeader(sessionID: sessionID)
-            Divider()
-            if let sessionID, let session = model.sessions.first(where: { $0.id == sessionID }) {
-                SessionContent(session: session, isFocused: isFocused, rootRequest: rootRequest)
-            } else {
-                EmptyPaneView(tileIndex: tileIndex)
-            }
+    /// Tile index of `session` when it is currently shown in a pane.
+    private func visibleTileIndex(of session: Session) -> Int? {
+        if model.splitMode {
+            return model.tileIndex(of: session.id)
         }
-        .overlay(
-            Rectangle()
-                .strokeBorder(isFocused ? Color.accentColor : Color.clear, lineWidth: 2)
+        return session.id == model.activeSessionID ? 0 : nil
+    }
+
+    private func isVisible(_ session: Session) -> Bool {
+        visibleTileIndex(of: session) != nil
+    }
+
+    private func cellWidth(for session: Session, cellWidth: CGFloat) -> CGFloat {
+        isVisible(session) ? cellWidth : 1
+    }
+
+    private func cellHeight(for session: Session, cellHeight: CGFloat) -> CGFloat {
+        isVisible(session) ? cellHeight : 1
+    }
+
+    private func offset(for session: Session, cellWidth: CGFloat, cellHeight: CGFloat, columns: Int) -> CGSize {
+        guard let index = visibleTileIndex(of: session) else {
+            return CGSize(width: -10_000, height: -10_000) // parked off-screen, still alive
+        }
+        return cellOffset(index, cellWidth: cellWidth, cellHeight: cellHeight, columns: columns)
+    }
+
+    private func cellOffset(_ index: Int, cellWidth: CGFloat, cellHeight: CGFloat, columns: Int) -> CGSize {
+        let column = index % columns
+        let row = index / columns
+        return CGSize(
+            width: CGFloat(column) * (cellWidth + gap),
+            height: CGFloat(row) * (cellHeight + gap)
         )
-        .contentShape(Rectangle())
-        .onTapGesture { model.focusTile(tileIndex) }
     }
 
-    @ViewBuilder
-    private func paneHeader(sessionID: Session.ID?) -> some View {
-        HStack(spacing: 6) {
-            if let sessionID, let session = model.sessions.first(where: { $0.id == sessionID }) {
-                Menu(session.displayTitle) {
-                    ForEach(model.sessions) { candidate in
-                        Button(candidate.displayTitle) {
-                            model.assign(candidate.id, toTile: tileIndex)
-                        }
-                    }
-                }
-                .menuStyle(.borderlessButton)
-                .font(.caption)
-                .fixedSize()
-            } else {
-                Text("Empty pane").font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer()
-            if model.splitMode {
-                Text("Pane \(tileIndex + 1)")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .padding(.horizontal, 8)
-        .frame(height: 24)
-        .background(isFocused ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
+    private var emptyTileIndices: [Int] {
+        model.tiles.indices.filter { model.tiles[$0] == nil }
+    }
+
+    private func focused(_ session: Session) -> Bool {
+        guard model.splitMode else { return true }
+        return model.tiles.indices.contains(model.focusedTile) && model.tiles[model.focusedTile] == session.id
     }
 }
 
+/// A pane with no session yet; lets the user drop a session into it.
 private struct EmptyPaneView: View {
     @Environment(AppModel.self) private var model
     let tileIndex: Int
@@ -223,17 +220,15 @@ private struct EmptyPaneView: View {
     var body: some View {
         VStack(spacing: 8) {
             Image(systemName: "rectangle.dashed")
-                .font(.system(size: 28, weight: .light))
+                .font(.system(size: 24, weight: .light))
                 .foregroundStyle(.tertiary)
-            Text("Pick a session for this pane")
+            Text("Empty pane")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             if !model.sessions.isEmpty {
                 Menu("Show…") {
                     ForEach(model.sessions) { candidate in
-                        Button(candidate.displayTitle) {
-                            model.assign(candidate.id, toTile: tileIndex)
-                        }
+                        Button(candidate.displayTitle) { model.assign(candidate.id, toTile: tileIndex) }
                     }
                 }
                 .fixedSize()
@@ -241,6 +236,8 @@ private struct EmptyPaneView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.background)
+        .contentShape(Rectangle())
+        .onTapGesture { model.focusTile(tileIndex) }
     }
 }
 
@@ -248,50 +245,86 @@ private struct EmptyPaneView: View {
 private struct SessionContent: View {
     @Environment(AppModel.self) private var model
     let session: Session
+    let isVisible: Bool
     let isFocused: Bool
-    let rootRequest: Int
+    let showPaneChrome: Bool
+    let onFocus: () -> Void
 
     @State private var state: SSHPtySession.State = .idle
 
     var body: some View {
         VStack(spacing: 0) {
+            if showPaneChrome { paneHeader }
             statusBar
             Divider()
-            if let node = model.find(session.nodeID), node.supportsSSH {
-                let effective = model.effective(node.id)
-                TerminalSessionView(
-                    host: effective?.host ?? "",
-                    port: effective?.port ?? 22,
-                    username: effective?.username ?? "",
-                    password: effective?.password ?? "",
-                    identityFile: effective?.identityFile ?? "",
-                    remoteCommand: effective?.remoteCommand ?? "",
-                    inputRequests: shouldSendRoot ? rootRequest : 0,
-                    pendingInput: "sudo -i\n",
-                    onStateChange: { newState in
-                        guard model.currentGeneration(of: session.id) == session.generation else { return }
-                        state = newState
-                        if case .disconnected(let reason) = newState, reason == nil {
-                            model.closeSession(session.id)
-                        }
-                    },
-                    onTitleChange: { model.updateTitle(session.id, title: $0) },
-                    onFocus: { model.focusTile(model.tileIndex(of: session.id) ?? model.focusedTile) }
-                )
-                .id(session.generation)
-            } else if let node = model.find(session.nodeID) {
-                UnsupportedProtocolView(name: node.name, protocolName: model.effective(node.id)?.protocolName ?? "")
-            } else {
-                Text("Connection no longer exists.")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            terminal
+        }
+        .background(.background)
+        .overlay(
+            Rectangle().strokeBorder(
+                isFocused && showPaneChrome ? Color.accentColor : Color.clear,
+                lineWidth: 2
+            )
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onFocus)
+    }
+
+    @ViewBuilder
+    private var terminal: some View {
+        if let node = model.find(session.nodeID), node.supportsSSH {
+            let effective = model.effective(node.id)
+            TerminalSessionView(
+                host: effective?.host ?? "",
+                port: effective?.port ?? 22,
+                username: effective?.username ?? "",
+                password: effective?.password ?? "",
+                identityFile: effective?.identityFile ?? "",
+                remoteCommand: effective?.remoteCommand ?? "",
+                inputRequests: isFocused ? model.rootRequest : 0,
+                pendingCommand: rootCommand(for: effective),
+                pendingPassword: effective?.password ?? "",
+                onStateChange: { newState in
+                    guard model.currentGeneration(of: session.id) == session.generation else { return }
+                    state = newState
+                    if case .disconnected(let reason) = newState, reason == nil {
+                        model.closeSession(session.id)
+                    }
+                },
+                onTitleChange: { model.updateTitle(session.id, title: $0) },
+                onFocus: onFocus
+            )
+            .id(session.generation)
+        } else if let node = model.find(session.nodeID) {
+            UnsupportedProtocolView(name: node.name, protocolName: model.effective(node.id)?.protocolName ?? "")
+        } else {
+            Text("Connection no longer exists.")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    /// Only the focused pane answers the root request.
-    private var shouldSendRoot: Bool {
-        isFocused && model.focusedSession?.id == session.id
+    /// `sudo -S -i` reads the password from stdin, so the coordinator can send the
+    /// stored one; plain `sudo -i` would prompt on the terminal instead.
+    private func rootCommand(for effective: EffectiveConnection?) -> String {
+        (effective?.password.isEmpty ?? true) ? "sudo -i" : "sudo -S -i"
+    }
+
+    private var paneHeader: some View {
+        HStack(spacing: 6) {
+            Menu(session.displayTitle) {
+                ForEach(model.sessions) { candidate in
+                    Button(candidate.displayTitle) { model.assign(candidate.id, toTileShowing: session.id) }
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .font(.caption)
+            .fixedSize()
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .background(isFocused ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
     }
 
     private var statusBar: some View {
@@ -316,7 +349,7 @@ private struct SessionContent: View {
             }
         }
         .padding(.horizontal, 10)
-        .frame(height: 26)
+        .frame(height: 24)
         .background(.bar)
     }
 

@@ -336,6 +336,29 @@ final class AppModel {
         tiles.firstIndex { $0 == session }
     }
 
+    /// Tabbing to a session: make it the active tab, and in split mode bring its
+    /// pane into focus.
+    func activateTab(_ id: Session.ID) {
+        activeSessionID = id
+        if splitMode, let index = tileIndex(of: id) { focusedTile = index }
+    }
+
+    /// A pane was clicked (or its terminal took focus): focus that session.
+    func focus(_ id: Session.ID) {
+        activeSessionID = id
+        if splitMode, let index = tileIndex(of: id) { focusedTile = index }
+    }
+
+    /// Changes what the pane currently showing `existing` displays.
+    func assign(_ newSession: Session.ID, toTileShowing existing: Session.ID) {
+        if splitMode, let index = tileIndex(of: existing) {
+            tiles[index] = newSession
+            reconcileTiles()
+        } else {
+            activeSessionID = newSession
+        }
+    }
+
     /// Re-runs the tiling rules against the current session list. Called after any
     /// change that adds/removes sessions or changes the pane count.
     private func reconcileTiles() {
@@ -414,6 +437,14 @@ final class AppModel {
 
     // MARK: - Elevation
 
+    /// Incremented each time the user asks to become root; the focused terminal
+    /// watches this and writes the sudo command.
+    private(set) var rootRequest = 0
+
+    func requestRoot() {
+        rootRequest += 1
+    }
+
     /// The session shown in the focused pane (where `sudo -i` runs). Falls back to
     /// the active session, so it also works in single-pane mode.
     var focusedSession: Session? {
@@ -422,7 +453,4 @@ final class AppModel {
         }
         return activeSession
     }
-
-    /// Command sent to the shell to become root; prompts for the password.
-    static let becomeRootCommand = "sudo -i"
 }

@@ -20,7 +20,11 @@ struct TerminalSessionView: NSViewRepresentable {
     let remoteCommand: String
 
     var inputRequests: Int = 0
-    var pendingInput: String = ""
+    /// Command written when `inputRequests` changes (e.g. `sudo -S -i`).
+    var pendingCommand: String = ""
+    /// Password written (with a newline) shortly after the command, when the
+    /// command reads one from stdin. Empty means nothing is auto-sent.
+    var pendingPassword: String = ""
 
     let onStateChange: @MainActor (SSHPtySession.State) -> Void
     let onTitleChange: @MainActor (String) -> Void
@@ -51,8 +55,8 @@ struct TerminalSessionView: NSViewRepresentable {
         context.coordinator.updateFocusHandler(onFocus)
         if inputRequests != context.coordinator.lastInputRequest {
             context.coordinator.lastInputRequest = inputRequests
-            if !pendingInput.isEmpty {
-                context.coordinator.write(pendingInput)
+            if !pendingCommand.isEmpty {
+                context.coordinator.runPending(command: pendingCommand, password: pendingPassword)
             }
             onInputRequestHandled()
         }
@@ -155,6 +159,16 @@ struct TerminalSessionView: NSViewRepresentable {
         /// Writes raw text to the ssh process (used for the root command).
         func write(_ text: String) {
             session?.send(Data(text.utf8))
+        }
+
+        /// Writes a command, then the password a moment later if the command reads
+        /// one from stdin (`sudo -S`). The delay lets the shell start reading.
+        func runPending(command: String, password: String) {
+            write(command + "\n")
+            guard !password.isEmpty else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.write(password + "\n")
+            }
         }
 
         func stop() {
