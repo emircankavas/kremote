@@ -95,9 +95,11 @@ final class AppModel {
         }
     }
 
-    /// Pulls each leaf's password out of the secret store into the in-memory node.
+    /// Pulls each node's password out of the secret store into the in-memory node.
+    /// Folders are included: a folder may hold a default password that its
+    /// connections inherit.
     private func hydratePasswords() {
-        for node in ConnectionNode.allNodes(in: roots) where !node.isFolder {
+        for node in ConnectionNode.allNodes(in: roots) {
             node.password = (try? secrets.secret(for: node.id)) ?? ""
         }
     }
@@ -175,7 +177,8 @@ final class AppModel {
 
     func delete(_ id: ConnectionNode.ID) {
         guard let removed = ConnectionNode.remove(id, from: &roots) else { return }
-        for node in ConnectionNode.allNodes(in: [removed]) where !node.isFolder {
+        // Folders can hold a default password too, so clear secrets for every node.
+        for node in ConnectionNode.allNodes(in: [removed]) {
             try? secrets.removeSecret(for: node.id)
         }
         if selectedNodeID == id { selectedNodeID = nil }

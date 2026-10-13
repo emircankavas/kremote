@@ -34,7 +34,25 @@ struct ConnectionEditorView: View {
                     TextField("Name", text: $draft.name)
                 }
 
-                if !isFolder {
+                if isFolder {
+                    Section {
+                        Text("Values set here are inherited by every connection inside this folder, unless a connection overrides them.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("Username", text: $draft.username, prompt: Text(inheritedUsernamePlaceholder))
+                        TextField("Protocol", text: $draft.protocolName, prompt: Text(inheritedProtocolPlaceholder))
+                        TextField("Port", value: $draft.port, format: .number, prompt: Text(inheritedPortPlaceholder))
+                            .frame(maxWidth: 140)
+                        TextField("Identity File", text: $draft.identityFile, prompt: Text(inheritedIdentityPlaceholder))
+                            .help("Private key passed as ssh -i. Blank means ssh picks (config, agent or default keys).")
+                        SecureField("Password", text: $draft.password)
+                            .help("Stored in the macOS Keychain, never written to disk as plain text.")
+                        TextField("Remote Command", text: $draft.remoteCommand, prompt: Text(inheritedCommandPlaceholder))
+                            .help("Run this instead of an interactive shell. Blank means a normal shell.")
+                    } header: {
+                        Text("Defaults for this folder")
+                    }
+                } else {
                     Section("Connection") {
                         if !inheritedHostPlaceholder.isEmpty {
                             Text("Host is inherited from the parent folder.")
