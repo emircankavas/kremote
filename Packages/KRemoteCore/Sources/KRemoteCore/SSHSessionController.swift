@@ -11,7 +11,7 @@ import NIOSSH
 @available(macOS 15.0, *)
 public actor SSHSessionController {
 
-    public enum State: Equatable {
+    public enum State: Equatable, Sendable {
         case idle
         case connecting
         case connected
