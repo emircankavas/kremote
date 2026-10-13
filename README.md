@@ -4,7 +4,27 @@ A native macOS multi-protocol remote connection client, with a connection tree,
 folders with attribute inheritance, tabbed sessions and direct import of
 `confCons.xml` files produced by [mRemoteNG](https://github.com/mRemoteNG/mRemoteNG).
 
-**Status:** early — Faz 1 (connection tree, persistence, editor). No protocol is implemented yet.
+**Status:** early — Faz 2 (mRemoteNG import). No protocol is implemented yet.
+
+## mRemoteNG import
+
+`File ▸ Import mRemoteNG confCons.xml…` (⇧⌘I) reads an mRemoteNG connection file
+into the tree, appending the imported folders and connections to the root, and
+pushes each decrypted password straight into the Keychain.
+
+- Schema 2.6, `EncryptionEngine="AES"` / `BlockCipherMode="GCM"`.
+- Passwords: `PBKDF2-HMAC-SHA1(passphrase, salt, KdfIterations)` → AES-256-GCM,
+  blob layout `salt(16) ‖ nonce(16) ‖ ciphertext ‖ tag(16)`, salt as AAD.
+- Default passphrase `mR3m` is tried first; if the file was saved with a custom
+  master password the app prompts for it. `Protected` is opened to verify the
+  passphrase before any node is touched.
+- `FullFileEncryption="true"` and non-GCM ciphers are rejected with a clear error.
+- `ConfConsSerializer` writes the tree back out as a readable confCons.xml
+  (the importer round-trips it; only the attributes needed to rebuild the tree
+  are emitted).
+
+The format is implemented independently from observation of real files and the
+publicly documented scheme; no mRemoteNG code or assets are used.
 
 ## Data & secrets
 
