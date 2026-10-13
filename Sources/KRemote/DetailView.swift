@@ -1,4 +1,5 @@
 import SwiftUI
+import KRemoteCore
 
 /// Right-hand side: the tab strip plus the active session's content.
 struct DetailView: View {
@@ -92,27 +93,74 @@ private struct PlaceholderView: View {
     }
 }
 
-/// Faz 1 stand-in. Faz 3 replaces the body with an embedded SwiftTerm view
-/// backed by a live SSH transport.
+/// Hosts a live SSH terminal for a connection, wired through SwiftTerm.
 struct SessionView: View {
     @Environment(AppModel.self) private var model
     let session: Session
 
+    @State private var state: SSHSessionController.State = .idle
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(spacing: 0) {
+            statusBar
+            Divider()
             if let node = model.find(session.nodeID) {
-                Text(node.name).font(.headline)
-                Text(model.effective(node.id)?.summary ?? "not configured")
-                    .font(.system(.body, design: .monospaced))
+                let effective = model.effective(node.id)
+                TerminalSessionView(
+                    nodeID: node.id,
+                    host: effective?.host ?? "",
+                    port: effective?.port ?? 22,
+                    username: effective?.username ?? "",
+                    password: effective?.password ?? "",
+                    onStateChange: { state = $0 }
+                )
+            } else {
+                Text("Connection no longer exists.")
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            Spacer()
-            Text("Terminal session lands here in Faz 3.")
-                .font(.callout)
-                .foregroundStyle(.tertiary)
-            Spacer()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .padding()
+    }
+
+    private var statusBar: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(statusColor)
+                .frame(width: 8, height: 8)
+            Text(statusText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer()
+            if let node = model.find(session.nodeID) {
+                Text(model.effective(node.id)?.summary ?? "")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 26)
+        .background(.bar)
+    }
+
+    private var statusColor: Color {
+        switch state {
+        case .connected: return .green
+        case .connecting: return .orange
+        case .idle: return .gray
+        case .disconnected: return .red
+        }
+    }
+
+    private var statusText: String {
+        switch state {
+        case .idle: return "Idle"
+        case .connecting: return "Connecting…"
+        case .connected: return "Connected"
+        case .disconnected(let reason):
+            if let reason, !reason.isEmpty { return "Disconnected — \(reason)" }
+            return "Disconnected"
+        }
     }
 }
