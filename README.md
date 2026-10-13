@@ -109,6 +109,19 @@ Sources/KRemote/       SwiftUI app: sidebar, tabs, editor sheet, SwiftTerm host
 - SSH is the system `ssh`; no SSH library is linked.
 - No `.xcodeproj` in git; `project.yml` is the source of truth.
 
+## Download
+
+Grab the latest `KRemote-<version>.dmg` from [Releases](../../releases), drag
+**KRemote** to Applications, and — because the app is **not notarized** (no Apple
+Developer account) — clear Gatekeeper's quarantine once:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/KRemote.app
+```
+
+or right-click the app → **Open** → **Open** again. It is ad-hoc signed, which is
+all an arm64 binary needs to run.
+
 ## Build
 
 ```bash
@@ -124,8 +137,13 @@ xcodebuild -project KRemote.xcodeproj -scheme KRemote \
   -configuration Debug -destination 'platform=macOS' build
 ```
 
-CI (`.github/workflows/ci.yml`) builds on `macos-15` and uploads an unsigned
-`.app` zip as a workflow artifact.
+- `.github/workflows/ci.yml` builds on `macos-15` and uploads an unsigned `.app`
+  zip as a workflow artifact (runs on every push).
+- `.github/workflows/release.yml` runs on a `v*` tag: builds Release, ad-hoc
+  signs, packages a `.dmg` + `.zip` and publishes a GitHub Release.
+
+To cut a release: bump `MARKETING_VERSION` in `project.yml` and tag the commit
+(`git tag v1.0.0 && git push origin v1.0.0`).
 
 ## License
 

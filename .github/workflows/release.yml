@@ -1,0 +1,135 @@
+name: Release
+
+# Tag-triggered: pushing a v* tag builds a Release .app, signs it ad-hoc and
+# attaches a .dmg to a GitHub Release.
+#
+# No Apple Developer account is required: the bundle is ad-hoc signed (enough for
+# arm64 to run) and NOT notarized. Users clear Gatekeeper's quarantine once with
+# `xattr -dr com.apple.quarantine /Applications/KRemote.app` (or right-click →
+# Open). Notarization is a later step that needs a paid developer account.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release (macOS)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -o pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (Release)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project KRemote.xcodeproj \
+            -scheme KRemote \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath build \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Verify the bundle was produced
+        run: |
+          set -o pipefail
+          APP="build/Build/Products/Release/KRemote.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::Release build produced no .app at $APP"
+            exit 1
+          fi
+          test -x "$APP/Contents/MacOS/KRemote" || { echo "::error::missing executable"; exit 1; }
+          echo "Bundle size:"; du -sh "$APP"
+
+      - name: Ad-hoc sign
+        run: |
+          set -o pipefail
+          APP="build/Build/Products/Release/KRemote.app"
+          # arm64 refuses to run an unsigned binary; ad-hoc is enough for the user
+          # to open it after clearing quarantine.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --verbose=2 "$APP" || true
+          codesign -dv "$APP" 2>&1 | sed -n '1,6p'
+
+      - name: Package .dmg
+        run: |
+          set -o pipefail
+          APP="build/Build/Products/Release/KRemote.app"
+          NAME="KRemote-${{ steps.version.outputs.version }}.dmg"
+          STAGE="dmg-stage"
+          rm -rf "$STAGE"; mkdir "$STAGE"
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "KRemote" -srcfolder "$STAGE" -ov -format UDZO "$NAME"
+          echo "dmg=$NAME" >> "$GITHUB_OUTPUT"
+        id: dmg
+
+      - name: Package .zip (fallback)
+        run: |
+          set -o pipefail
+          ditto -c -k --sequesterRsrc --keepParent \
+            build/Build/Products/Release/KRemote.app \
+            "KRemote-${{ steps.version.outputs.version }}.zip"
+
+      - name: Write release notes
+        run: |
+          cat > RELEASE_NOTES.md <<'EOF'
+          ## KRemote ${{ steps.version.outputs.tag }}
+
+          Native macOS remote connection manager — SSH sessions, a connection tree
+          with folder credential inheritance and mRemoteNG `confCons.xml` import.
+
+          ### Install
+          1. Download `KRemote-${{ steps.version.outputs.version }}.dmg` and open it.
+          2. Drag **KRemote** to Applications.
+          3. The app is **not notarized** (no Apple Developer account yet), so macOS
+             quarantines it. Clear that once with either:
+             - Terminal: `xattr -dr com.apple.quarantine /Applications/KRemote.app`
+             - or right-click the app → **Open** → **Open** again.
+
+          Then open it normally.
+          EOF
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: KRemote ${{ steps.version.outputs.tag }}
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            KRemote-${{ steps.version.outputs.version }}.dmg
+            KRemote-${{ steps.version.outputs.version }}.zip
