@@ -1,0 +1,23 @@
+# XcodeGen output — never commit the generated project.
+*.xcodeproj
+*.xcworkspace
+
+# Build products
+build/
+DerivedData/
+.build/
+.build-xcode/
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+
+# SwiftPM
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
+
+# Local secrets
+*.local.xcconfig

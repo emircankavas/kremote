@@ -1,0 +1,46 @@
+name: KRemote
+
+options:
+  bundleIdPrefix: com.emircankavas
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    DEAD_CODE_STRIPPING: "YES"
+    # Ad-hoc signing for local dev. CI overrides with CODE_SIGNING_ALLOWED=NO.
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    ENABLE_HARDENED_RUNTIME: "NO"
+    # Reference the checked-in plist explicitly; never let XcodeGen auto-generate one.
+    GENERATE_INFOPLIST_FILE: "NO"
+    INFOPLIST_FILE: Info.plist
+
+targets:
+  KRemote:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/KRemote
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.emircankavas.kremote
+        PRODUCT_NAME: KRemote
+
+schemes:
+  KRemote:
+    build:
+      targets:
+        KRemote: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+    archive:
+      config: Release
