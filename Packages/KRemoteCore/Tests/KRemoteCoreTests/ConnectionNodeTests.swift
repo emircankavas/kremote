@@ -47,14 +47,22 @@ final class ConnectionNodeTests: XCTestCase {
 
     func testIdentityFileAndRemoteCommandInherit() {
         let root = ConnectionNode(kind: .folder, name: "Corp", identityFile: "~/.ssh/id_corp")
-        let middle = ConnectionNode(kind: .folder, name: "Team", remoteCommand: "tmux attach")
-        let leaf = ConnectionNode(kind: .connection, name: "host", host: "h", identityFile: "/override/id")
+        let middle = ConnectionNode(kind: .folder, name: "Team")
+        let leaf = ConnectionNode(kind: .connection, name: "host", host: "h", identityFile: "/override/id", remoteCommand: "tmux attach")
         middle.children = [leaf]
         root.children = [middle]
 
         let effective = ConnectionNode.effective(for: leaf.id, in: [root])
         XCTAssertEqual(effective?.identityFile, "/override/id", "leaf overrides the folder's key")
-        XCTAssertEqual(effective?.remoteCommand, "tmux attach", "command inherited from the middle folder")
+        XCTAssertEqual(effective?.remoteCommand, "tmux attach", "remote command is per-connection")
+    }
+
+    func testRemoteCommandIsNotInherited() {
+        // Remote command is per-connection, not a folder default.
+        let folder = ConnectionNode(kind: .folder, name: "Corp", remoteCommand: "tmux attach")
+        let leaf = ConnectionNode(kind: .connection, name: "host", host: "h")
+        folder.children = [leaf]
+        XCTAssertEqual(ConnectionNode.effective(for: leaf.id, in: [folder])?.remoteCommand, "")
     }
 
     func testFolderItselfResolvesToInheritedDefaults() {
@@ -65,22 +73,35 @@ final class ConnectionNodeTests: XCTestCase {
     }
 
     func testPortDefaultsToProtocolWhenNothingSetsIt() {
-        // A folder carrying only a protocol should give its connections the
-        // protocol's own default port, not SSH's 22.
-        let folder = ConnectionNode(kind: .folder, name: "Web", protocolName: "HTTPS")
-        let leaf = ConnectionNode(kind: .connection, name: "ilot", host: "10.0.0.9")
-        folder.children = [leaf]
+        // No port and no explicit protocol → SSH's default.
+        let leaf = ConnectionNode(kind: .connection, name: "x", host: "h")
+        XCTAssertEqual(ConnectionNode.effective(for: leaf.id, in: [leaf])?.port, 22)
 
-        let effective = ConnectionNode.effective(for: leaf.id, in: [folder])
-        XCTAssertEqual(effective?.protocolName, "HTTPS")
-        XCTAssertEqual(effective?.port, 443, "HTTPS should default to 443, not 22")
+        // A protocol set on the connection decides its own default port.
+        let https = ConnectionNode(kind: .connection, name: "y", host: "h", protocolName: "HTTPS")
+        XCTAssertEqual(ConnectionNode.effective(for: https.id, in: [https])?.port, 443)
     }
 
-    func testExplicitPortStillWins() {
-        let folder = ConnectionNode(kind: .folder, name: "Web", port: 8443, protocolName: "HTTPS")
-        let leaf = ConnectionNode(kind: .connection, name: "ilot", host: "h")
-        folder.children = [leaf]
-        XCTAssertEqual(ConnectionNode.effective(for: leaf.id, in: [folder])?.port, 8443)
+    func testFolderProtocolAndPortAreNotInherited() {
+        // A folder with RDP/3389 must NOT force RDP on an SSH child — protocol and
+        // port are per-connection, because a folder mixes SSH/RDP/HTTPS children.
+        let folder = ConnectionNode(kind: .folder, name: "Mixed", port: 3389, protocolName: "RDP")
+        let sshChild = ConnectionNode(kind: .connection, name: "server", host: "h")
+        folder.children = [sshChild]
+
+        let effective = ConnectionNode.effective(for: sshChild.id, in: [folder])
+        XCTAssertEqual(effective?.protocolName, "SSH", "folder must not leak RDP onto an SSH child")
+        XCTAssertEqual(effective?.port, 22, "folder's 3389 must not leak onto an SSH child")
+    }
+
+    func testFolderStillContributesCredentials() {
+        let folder = ConnectionNode(kind: .folder, name: "Corp", username: "svc", identityFile: "~/.ssh/id_corp")
+        let child = ConnectionNode(kind: .connection, name: "server", host: "h")
+        folder.children = [child]
+
+        let effective = ConnectionNode.effective(for: child.id, in: [folder])
+        XCTAssertEqual(effective?.username, "svc", "credentials still inherit from the folder")
+        XCTAssertEqual(effective?.identityFile, "~/.ssh/id_corp")
     }
 
     func testLeafPortOverridesProtocolDefault() {

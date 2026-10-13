@@ -130,11 +130,6 @@ public struct EffectiveConnection: Equatable, Sendable {
     public var identityFile: String
     public var remoteCommand: String
 
-    /// Internal: whether any node in the chain set a port explicitly. When none
-    /// did, the port falls back to the protocol's own default (443 for HTTPS,
-    /// 3389 for RDP, …) rather than SSH's 22.
-    var portWasSet: Bool = false
-
     public init(
         host: String = "",
         port: Int = 22,
@@ -165,29 +160,34 @@ public struct EffectiveConnection: Equatable, Sendable {
 }
 
 extension ConnectionNode {
-    /// Folds this node's directly-set values over what it inherited.
+    /// Folds this node's values over what it inherited.
+    ///
+    /// Only **credentials** inherit: username, password and identity file. A
+    /// folder is a group of servers that log in the same way, so those belong on
+    /// the folder. Host, protocol, port and remote command are properties of an
+    /// individual connection — a folder routinely holds SSH, RDP and HTTPS
+    /// children at once, so inheriting a protocol from it would be wrong.
     public func effective(inheriting parent: EffectiveConnection?) -> EffectiveConnection {
         let base = parent ?? .default
-        let resolvedProtocol = protocolName.isEmpty ? base.protocolName : protocolName
 
-        var result = EffectiveConnection(
-            host: host.isEmpty ? base.host : host,
-            port: port == 0 ? base.port : port,
+        let resolvedProtocol = protocolName.isEmpty ? "SSH" : protocolName
+        let resolvedPort: Int
+        if port != 0 {
+            resolvedPort = port
+        } else {
+            let protocolDefault = RemoteProtocol(resolvedProtocol).defaultPort
+            resolvedPort = protocolDefault > 0 ? protocolDefault : 22
+        }
+
+        return EffectiveConnection(
+            host: host,
+            port: resolvedPort,
             username: username.isEmpty ? base.username : username,
             protocolName: resolvedProtocol,
             password: password.isEmpty ? base.password : password,
             identityFile: identityFile.isEmpty ? base.identityFile : identityFile,
-            remoteCommand: remoteCommand.isEmpty ? base.remoteCommand : remoteCommand
+            remoteCommand: remoteCommand
         )
-
-        // A port set anywhere down the chain wins. When nothing set one, use the
-        // protocol's default so a "HTTPS" connection does not land on 22.
-        result.portWasSet = port != 0 || base.portWasSet
-        if !result.portWasSet {
-            let protocolDefault = RemoteProtocol(resolvedProtocol).defaultPort
-            if protocolDefault > 0 { result.port = protocolDefault }
-        }
-        return result
     }
 
     /// Resolved settings for a node somewhere in `roots`, or nil if not found.
