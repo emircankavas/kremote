@@ -77,7 +77,7 @@ final class ConnectionNodeTests: XCTestCase {
     }
 
     func testExplicitPortStillWins() {
-        let folder = ConnectionNode(kind: .folder, name: "Web", protocolName: "HTTPS", port: 8443)
+        let folder = ConnectionNode(kind: .folder, name: "Web", port: 8443, protocolName: "HTTPS")
         let leaf = ConnectionNode(kind: .connection, name: "ilot", host: "h")
         folder.children = [leaf]
         XCTAssertEqual(ConnectionNode.effective(for: leaf.id, in: [folder])?.port, 8443)
