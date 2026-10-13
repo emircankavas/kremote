@@ -1,4 +1,5 @@
 import SwiftUI
+import KRemoteCore
 
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
@@ -12,7 +13,7 @@ struct SidebarView: View {
 
         List(selection: $model.selectedNodeID) {
             OutlineGroup(model.roots, children: \.childNodes) { node in
-                NodeRow(node: node)
+                NodeRow(node: node, effective: model.effective(node.id))
                     .tag(node.id)
                     .contextMenu { menu(for: node) }
             }
@@ -71,6 +72,7 @@ struct SidebarView: View {
             Button("Open") { model.open(node) }
             Divider()
         }
+        Button("Edit…") { model.editingNodeID = node.id }
         Button("Rename…") { beginRename(node) }
         Button("Delete", role: .destructive) { deleteTarget = node.id }
     }
@@ -79,6 +81,7 @@ struct SidebarView: View {
 private struct NodeRow: View {
     @Environment(AppModel.self) private var model
     let node: ConnectionNode
+    let effective: EffectiveConnection?
 
     var body: some View {
         HStack(spacing: 6) {
@@ -89,7 +92,7 @@ private struct NodeRow: View {
                 Text(node.name)
                     .lineLimit(1)
                 if !node.isFolder {
-                    Text(node.subtitle)
+                    Text(effective?.summary ?? "not configured")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)

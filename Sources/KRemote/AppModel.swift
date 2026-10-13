@@ -1,7 +1,8 @@
 import Foundation
 import Observation
+import KRemoteCore
 
-/// An open remote session. Faz 0 only records that a tab exists; Faz 3 attaches
+/// An open remote session. Faz 1 only records that a tab exists; Faz 3 attaches
 /// a live SSH transport + terminal view to it.
 struct Session: Identifiable, Hashable {
     let id = UUID()
@@ -16,54 +17,96 @@ struct Session: Identifiable, Hashable {
 @Observable
 final class AppModel {
     /// Root of the connection tree.
-    var roots: [ConnectionNode] = ConnectionNode.sample
+    private(set) var roots: [ConnectionNode] = []
 
-    /// Currently highlighted row in the sidebar. Drives where new items go.
+    /// Currently highlighted row in the sidebar. Drives where new items go and
+    /// which node the editor sheet edits.
     var selectedNodeID: ConnectionNode.ID?
+
+    /// Set to a node id to present the editor sheet. `ConnectionEditorView`
+    /// observes this and loads the node's draft.
+    var editingNodeID: ConnectionNode.ID?
 
     /// Open session tabs, in order.
     var sessions: [Session] = []
     var activeSessionID: Session.ID?
 
+    /// Surfaced in the UI when load/save/Keychain fails; not fatal.
+    var lastError: String?
+
+    private let store: NodeStore
+    private let secrets: SecretStore
+
+    init(store: NodeStore = .defaultStore(), secrets: SecretStore? = nil) {
+        self.store = store
+        self.secrets = secrets ?? KeychainSecretStore()
+        load()
+    }
+
+    // MARK: - Persistence
+
+    func load() {
+        do {
+            if let stored = try store.load() {
+                roots = stored
+            } else {
+                // First run: seed content and write it, so the tree is real data
+                // the user can edit rather than a hard-coded placeholder.
+                roots = ConnectionNode.sample
+                try store.save(roots)
+            }
+            hydratePasswords()
+        } catch {
+            lastError = "Could not load connections: \(error)"
+            roots = ConnectionNode.sample
+            hydratePasswords()
+        }
+    }
+
+    /// Saves the tree. Called by every mutation; cheap at this scale.
+    ///
+    /// `roots = roots` is deliberate: `ConnectionNode` is a plain reference type,
+    /// so `@Observable` only tracks `AppModel`'s own stored properties. Mutating a
+    /// nested node (`folder.name`, `folder.children`) changes no `AppModel`
+    /// property and would otherwise leave the sidebar stale. Re-assigning `roots`
+    /// fires the observation and re-renders the tree.
+    private func persist() {
+        roots = roots
+        do {
+            try store.save(roots)
+            lastError = nil
+        } catch {
+            lastError = "Could not save connections: \(error)"
+        }
+    }
+
+    /// Pulls each leaf's password out of the secret store into the in-memory node.
+    private func hydratePasswords() {
+        for node in ConnectionNode.allNodes(in: roots) where !node.isFolder {
+            node.password = (try? secrets.secret(for: node.id)) ?? ""
+        }
+    }
+
     // MARK: - Selection
 
     var selectedNode: ConnectionNode? {
         guard let selectedNodeID else { return nil }
-        return find(selectedNodeID)
+        return ConnectionNode.find(selectedNodeID, in: roots)
     }
 
     /// Folder that should receive a newly created item.
     var selectedFolderID: ConnectionNode.ID? {
         guard let node = selectedNode else { return nil }
-        return node.isFolder ? node.id : parentID(of: node.id)
+        return node.isFolder ? node.id : ConnectionNode.parentID(of: node.id, in: roots)
     }
 
     func find(_ id: ConnectionNode.ID) -> ConnectionNode? {
-        Self.find(id, in: roots)
+        ConnectionNode.find(id, in: roots)
     }
 
-    private static func find(_ id: ConnectionNode.ID, in nodes: [ConnectionNode]) -> ConnectionNode? {
-        for node in nodes {
-            if node.id == id { return node }
-            if let hit = find(id, in: node.children) { return hit }
-        }
-        return nil
-    }
-
-    private func parentID(of id: ConnectionNode.ID) -> ConnectionNode.ID? {
-        Self.parentID(of: id, in: roots, parent: nil)
-    }
-
-    private static func parentID(
-        of id: ConnectionNode.ID,
-        in nodes: [ConnectionNode],
-        parent: ConnectionNode.ID?
-    ) -> ConnectionNode.ID? {
-        for node in nodes {
-            if node.id == id { return parent }
-            if let hit = parentID(of: id, in: node.children, parent: node.id) { return hit }
-        }
-        return nil
+    /// Settings of a node with folders' values folded in.
+    func effective(_ id: ConnectionNode.ID) -> EffectiveConnection? {
+        ConnectionNode.effective(for: id, in: roots)
     }
 
     // MARK: - Mutations
@@ -72,16 +115,19 @@ final class AppModel {
         let folder = ConnectionNode(kind: .folder, name: "New Folder")
         insert(folder, into: folderID)
         selectedNodeID = folder.id
+        persist()
     }
 
     func addConnection(inFolder folderID: ConnectionNode.ID?) {
         let connection = ConnectionNode(kind: .connection, name: "New Connection")
         insert(connection, into: folderID)
         selectedNodeID = connection.id
+        editingNodeID = connection.id
+        persist()
     }
 
     private func insert(_ node: ConnectionNode, into folderID: ConnectionNode.ID?) {
-        guard let folderID, let folder = find(folderID) else {
+        guard let folderID, let folder = ConnectionNode.find(folderID, in: roots) else {
             roots.append(node)
             return
         }
@@ -90,27 +136,49 @@ final class AppModel {
 
     func rename(_ id: ConnectionNode.ID, to name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        find(id)?.name = trimmed
+        guard !trimmed.isEmpty, let node = find(id) else { return }
+        node.name = trimmed
+        persist()
     }
 
     func delete(_ id: ConnectionNode.ID) {
-        if Self.remove(id, from: &roots) {
-            if selectedNodeID == id { selectedNodeID = nil }
-            sessions.removeAll { $0.nodeID == id }
+        guard let removed = ConnectionNode.remove(id, from: &roots) else { return }
+        for node in ConnectionNode.allNodes(in: [removed]) where !node.isFolder {
+            try? secrets.removeSecret(for: node.id)
         }
+        if selectedNodeID == id { selectedNodeID = nil }
+        sessions.removeAll { $0.nodeID == id }
+        persist()
     }
 
-    @discardableResult
-    private static func remove(_ id: ConnectionNode.ID, from nodes: inout [ConnectionNode]) -> Bool {
-        if let index = nodes.firstIndex(where: { $0.id == id }) {
-            nodes.remove(at: index)
-            return true
+    // MARK: - Editing
+
+    func draft(for id: ConnectionNode.ID) -> ConnectionDraft? {
+        find(id).map(ConnectionDraft.init(from:))
+    }
+
+    /// Applies an edited draft back to the tree and the Keychain.
+    func apply(_ draft: ConnectionDraft) {
+        guard let node = find(draft.id) else { return }
+        node.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        node.host = draft.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        node.port = draft.port
+        node.username = draft.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        node.protocolName = draft.protocolName.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        node.password = draft.password
+
+        do {
+            try secrets.setSecret(draft.password, for: node.id)
+            lastError = nil
+        } catch {
+            lastError = "Could not save password: \(error)"
         }
-        for node in nodes {
-            if remove(id, from: &node.children) { return true }
+
+        // Keep a tab's title in sync with a rename.
+        for index in sessions.indices where sessions[index].nodeID == node.id {
+            sessions[index].title = node.name
         }
-        return false
+        persist()
     }
 
     // MARK: - Sessions

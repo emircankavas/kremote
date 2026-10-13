@@ -20,18 +20,34 @@ settings:
     ENABLE_HARDENED_RUNTIME: "NO"
     # Reference the checked-in plist explicitly; never let XcodeGen auto-generate one.
     GENERATE_INFOPLIST_FILE: "NO"
-    INFOPLIST_FILE: Info.plist
 
 targets:
+  KRemoteCore:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: Sources/KRemoteCore
+
   KRemote:
     type: application
     platform: macOS
     sources:
       - path: Sources/KRemote
+    dependencies:
+      - target: KRemoteCore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.emircankavas.kremote
         PRODUCT_NAME: KRemote
+        INFOPLIST_FILE: Info.plist
+
+  KRemoteCoreTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/KRemoteCoreTests
+    dependencies:
+      - target: KRemoteCore
 
 schemes:
   KRemote:
@@ -42,5 +58,7 @@ schemes:
       config: Debug
     test:
       config: Debug
+      targets:
+        - KRemoteCoreTests
     archive:
       config: Release

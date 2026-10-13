@@ -42,6 +42,18 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
+      - name: Test
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project KRemote.xcodeproj \
+            -scheme KRemote \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+
       - name: Package .app
         run: |
           set -o pipefail

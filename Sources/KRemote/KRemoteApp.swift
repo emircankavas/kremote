@@ -1,4 +1,5 @@
 import SwiftUI
+import KRemoteCore
 
 @main
 struct KRemoteApp: App {
@@ -23,6 +24,12 @@ struct KRemoteApp: App {
                     model.addFolder(inFolder: model.selectedFolderID)
                 }
                 .keyboardShortcut("n", modifiers: [.command, .option])
+                Divider()
+                Button("Edit…") {
+                    if let id = model.selectedNodeID { model.editingNodeID = id }
+                }
+                .keyboardShortcut("e", modifiers: .command)
+                .disabled(model.selectedNodeID == nil)
             }
         }
     }

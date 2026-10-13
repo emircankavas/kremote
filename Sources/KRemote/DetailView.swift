@@ -92,7 +92,7 @@ private struct PlaceholderView: View {
     }
 }
 
-/// Faz 0 stand-in. Faz 3 replaces the body with an embedded SwiftTerm view
+/// Faz 1 stand-in. Faz 3 replaces the body with an embedded SwiftTerm view
 /// backed by a live SSH transport.
 struct SessionView: View {
     @Environment(AppModel.self) private var model
@@ -102,7 +102,7 @@ struct SessionView: View {
         VStack(alignment: .leading, spacing: 8) {
             if let node = model.find(session.nodeID) {
                 Text(node.name).font(.headline)
-                Text(node.subtitle)
+                Text(model.effective(node.id)?.summary ?? "not configured")
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
