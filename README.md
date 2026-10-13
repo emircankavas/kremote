@@ -30,6 +30,12 @@ folders with attribute inheritance, tabbed sessions and direct import of
   3389 for RDP, 22 for SSH…).
 - Only **SSH** connections can be opened; imported RDP/HTTPS/Telnet/VNC rows are
   stored and shown but open an "unsupported protocol" notice.
+- **Toolbar buttons** (above the tabs): `#` sends `sudo -i` to the focused
+  session (it prompts for the password, like any `sudo`); the split button and
+  the `2 / 3 / 4` buttons open a **split view** of up to four panes. ⌘D toggles
+  split view, and a **Session** menu mirrors it. Each pane picks its session from
+  its header menu; the focused pane (accent border) is where the root command and
+  keystrokes go.
 
 
 
