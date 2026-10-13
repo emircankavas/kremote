@@ -31,6 +31,12 @@ struct KRemoteApp: App {
                 .keyboardShortcut("e", modifiers: .command)
                 .disabled(model.selectedNodeID == nil)
             }
+            CommandGroup(after: .importExport) {
+                Button("Import mRemoteNG confCons.xml…") {
+                    model.isImportingConfCons = true
+                }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
+            }
         }
     }
 }

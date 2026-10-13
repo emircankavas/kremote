@@ -181,6 +181,54 @@ final class AppModel {
         persist()
     }
 
+    // MARK: - Import (mRemoteNG confCons.xml)
+
+    /// Set true to present the file picker.
+    var isImportingConfCons = false
+    /// Set when a file needs a master passphrase the default doesn't open.
+    var pendingImportURL: URL?
+    /// Human-readable result of the last import, shown as a notice.
+    var importSummary: String?
+
+    func importConfCons(from url: URL) {
+        do {
+            try performImport(from: url, passphrase: nil)
+        } catch ConfConsImporter.ImportError.wrongPassphrase {
+            // Needs a user master passphrase — the UI prompts, then calls the overload.
+            pendingImportURL = url
+        } catch {
+            lastError = "Import failed: \(error)"
+        }
+    }
+
+    func importConfCons(from url: URL, passphrase: String) {
+        do {
+            try performImport(from: url, passphrase: passphrase)
+        } catch {
+            lastError = "Import failed: \(error)"
+        }
+    }
+
+    private func performImport(from url: URL, passphrase: String?) throws {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+
+        let data = try Data(contentsOf: url)
+        let result = try ConfConsImporter.importTree(from: data, passphrase: passphrase)
+
+        // Imported passwords go straight into the Keychain under their node ids.
+        for (id, secret) in result.passwords {
+            try? secrets.setSecret(secret, for: id)
+        }
+
+        roots.append(contentsOf: result.roots)
+        persist()
+
+        let count = ConnectionNode.allNodes(in: result.roots).count
+        let version = result.version.map { " (mRemoteNG schema \($0))" } ?? ""
+        importSummary = "Imported \(count) item\(count == 1 ? "" : "s")\(version)."
+    }
+
     // MARK: - Sessions
 
     /// Opens (or focuses) a session for a connection leaf.

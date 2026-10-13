@@ -7,6 +7,13 @@ options:
   createIntermediateGroups: true
   groupSortPosition: top
 
+packages:
+  swift-crypto:
+    url: https://github.com/apple/swift-crypto
+    # Pin exactly: 5.x needs a Swift 6.2 toolchain (absent from current CI Xcode),
+    # and the PBKDF2/GCM APIs used here already exist in 4.5.x.
+    exactVersion: 4.5.2
+
 settings:
   base:
     MARKETING_VERSION: "0.1.0"
@@ -27,6 +34,11 @@ targets:
     platform: macOS
     sources:
       - path: Sources/KRemoteCore
+    dependencies:
+      - package: swift-crypto
+        product: Crypto
+      - package: swift-crypto
+        product: CryptoExtras
 
   KRemote:
     type: application
@@ -35,6 +47,10 @@ targets:
       - path: Sources/KRemote
     dependencies:
       - target: KRemoteCore
+      - package: swift-crypto
+        product: Crypto
+      - package: swift-crypto
+        product: CryptoExtras
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.emircankavas.kremote
@@ -48,6 +64,10 @@ targets:
       - path: Tests/KRemoteCoreTests
     dependencies:
       - target: KRemoteCore
+      - package: swift-crypto
+        product: Crypto
+      - package: swift-crypto
+        product: CryptoExtras
 
 schemes:
   KRemote:
