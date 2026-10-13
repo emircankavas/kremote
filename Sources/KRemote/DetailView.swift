@@ -280,7 +280,7 @@ private struct SessionContent: View {
                 password: effective?.password ?? "",
                 identityFile: effective?.identityFile ?? "",
                 remoteCommand: effective?.remoteCommand ?? "",
-                inputRequests: isFocused ? model.rootRequest : 0,
+                inputRequests: model.rootTarget == session.id ? model.rootRequest : 0,
                 pendingCommand: rootCommand(for: effective),
                 pendingPassword: effective?.password ?? "",
                 onStateChange: { newState in

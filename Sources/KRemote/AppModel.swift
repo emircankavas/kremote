@@ -437,11 +437,17 @@ final class AppModel {
 
     // MARK: - Elevation
 
-    /// Incremented each time the user asks to become root; the focused terminal
+    /// Incremented each time the user asks to become root; the targeted terminal
     /// watches this and writes the sudo command.
     private(set) var rootRequest = 0
+    /// Which session the last root request was aimed at. Set only by
+    /// `requestRoot` — never by focus changes — so merely clicking around panes
+    /// cannot look like a new request.
+    private(set) var rootTarget: Session.ID?
 
     func requestRoot() {
+        guard let session = focusedSession else { return }
+        rootTarget = session.id
         rootRequest += 1
     }
 

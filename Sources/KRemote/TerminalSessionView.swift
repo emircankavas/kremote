@@ -53,12 +53,16 @@ struct TerminalSessionView: NSViewRepresentable {
 
     func updateNSView(_ view: TerminalView, context: Context) {
         context.coordinator.updateFocusHandler(onFocus)
-        if inputRequests != context.coordinator.lastInputRequest {
+        // Fire only when the counter *increases*. A decrease happens when a
+        // session stops being the root target, and must not be mistaken for a
+        // fresh request.
+        let previous = context.coordinator.lastInputRequest
+        if inputRequests != previous {
             context.coordinator.lastInputRequest = inputRequests
-            if !pendingCommand.isEmpty {
+            if inputRequests > previous, !pendingCommand.isEmpty {
                 context.coordinator.runPending(command: pendingCommand, password: pendingPassword)
+                onInputRequestHandled()
             }
-            onInputRequestHandled()
         }
     }
 
