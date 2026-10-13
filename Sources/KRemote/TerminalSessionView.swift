@@ -12,7 +12,7 @@ struct TerminalSessionView: NSViewRepresentable {
     let port: Int
     let username: String
     let password: String
-    let onStateChange: (SSHSessionController.State) -> Void
+    let onStateChange: @MainActor (SSHSessionController.State) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(nodeID: nodeID, host: host, port: port, username: username, password: password)
@@ -54,7 +54,7 @@ struct TerminalSessionView: NSViewRepresentable {
             self.password = password
         }
 
-        func attach(view: TerminalView, onStateChange: @escaping (SSHSessionController.State) -> Void) {
+        func attach(view: TerminalView, onStateChange: @escaping @MainActor (SSHSessionController.State) -> Void) {
             self.view = view
 
             let controller = SSHSessionController(
