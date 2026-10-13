@@ -4,7 +4,25 @@ A native macOS multi-protocol remote connection client, with a connection tree,
 folders with attribute inheritance, tabbed sessions and direct import of
 `confCons.xml` files produced by [mRemoteNG](https://github.com/mRemoteNG/mRemoteNG).
 
-**Status:** very early — Faz 0 (UI skeleton). No protocol is implemented yet.
+**Status:** early — Faz 1 (connection tree, persistence, editor). No protocol is implemented yet.
+
+## Data & secrets
+
+- The tree is stored as JSON at
+  `~/Library/Application Support/KRemote/tree.json`.
+- Passwords live in the **macOS Keychain** (one generic-password item per node).
+  They are never written to the JSON file — the node's `password` field is
+  deliberately excluded from `CodingKeys`, and a unit test asserts it stays out.
+- Per-node values are *directly set*; a blank field (or port `0`) means
+  **inherit from the parent folder**, resolved by `EffectiveConnection`.
+
+## Layout
+
+```
+Sources/KRemoteCore/   tree model, inheritance, JSON store, Keychain  (unit-tested)
+Sources/KRemote/       SwiftUI app: sidebar, tabs, editor sheet
+Tests/KRemoteCoreTests/
+```
 
 ## Scope
 
