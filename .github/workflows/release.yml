@@ -89,14 +89,31 @@ jobs:
           test -x "$APP/Contents/MacOS/KRemote" || { echo "::error::missing executable"; exit 1; }
           echo "Bundle size:"; du -sh "$APP"
 
-      - name: Ad-hoc sign
+      - name: Sign with the stable identity
+        env:
+          KC_PASSWORD: ${{ secrets.SIGNING_KEYCHAIN_PASSWORD }}
         run: |
           set -o pipefail
           APP="build/Build/Products/Release/KRemote.app"
-          # arm64 refuses to run an unsigned binary; ad-hoc is enough for the user
-          # to open it after clearing quarantine.
-          codesign --force --deep --sign - "$APP"
+          KEYCHAIN="$HOME/hermes-build/signing/kremote-signing.keychain-db"
+
+          # A stable identity matters, not just "signed": an ad-hoc signature's
+          # designated requirement is a cdhash that changes every build, which
+          # invalidates the keychain ACL of every stored password and makes macOS
+          # re-prompt after each update. Signing with a fixed certificate changes
+          # the requirement to `certificate leaf = H"..."`, which survives updates.
+          if [ -n "${KC_PASSWORD:-}" ] && [ -f "$KEYCHAIN" ]; then
+            security unlock-keychain -p "$KC_PASSWORD" "$KEYCHAIN"
+            codesign --force --deep --sign "KRemote Dev" "$APP"
+          else
+            echo "::warning::Stable signing identity unavailable; falling back to ad-hoc."
+            echo "::warning::Keychain passwords will be re-prompted after this update."
+            codesign --force --deep --sign - "$APP"
+          fi
+
           codesign --verify --verbose=2 "$APP" || true
+          echo "Designated requirement:"
+          codesign -d -r- "$APP" 2>&1 | sed -n '2,3p'
           codesign -dv "$APP" 2>&1 | sed -n '1,6p'
 
       - name: Package .dmg

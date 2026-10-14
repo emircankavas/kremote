@@ -67,3 +67,35 @@ restrict workflow runs to approved contributors) first.
 # to remove the runner entirely
 cd ~/actions-runner && ./svc.sh stop && ./svc.sh uninstall && ./config.sh remove --token <TOKEN>
 ```
+
+## Stable code-signing identity
+
+Keychain items are protected by an ACL tied to the app's **designated
+requirement**. Under an ad-hoc signature (`codesign --sign -`) that requirement
+is a content hash (`cdhash H"..."`) which changes on every build, so each update
+invalidates the ACL of every stored password and macOS re-prompts for each one
+after an update — "Always Allow" does not survive.
+
+The fix is a *stable* identity. `scripts/setup-signing-identity.sh` creates a
+self-signed code-signing certificate (no Apple Developer account needed) in a
+dedicated keychain at `~/hermes-build/signing/kremote-signing.keychain-db` and
+puts it on the user search list. Signing with it yields:
+
+```
+designated => identifier "com.emircankavas.kremote" and certificate leaf = H"..."
+```
+
+which is identical for every build, so the keychain grants persist across
+updates.
+
+The release workflow unlocks that keychain with the repository secret
+`SIGNING_KEYCHAIN_PASSWORD` (the keychain password chosen at setup) and signs
+with `codesign --sign "KRemote Dev"`. If the secret or the keychain is missing
+the workflow warns and falls back to ad-hoc.
+
+To recreate the identity on a new machine, run the script with the same password
+as the secret:
+
+```bash
+KM_SIGNING_PASSWORD='<secret>' bash scripts/setup-signing-identity.sh
+```
