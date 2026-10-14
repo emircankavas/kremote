@@ -29,6 +29,9 @@
 #include <freerdp/channels/channels.h>
 #include <freerdp/client/channels.h>
 #include <freerdp/client/disp.h>
+#include <freerdp/client/cliprdr.h>
+#include <freerdp/channels/cliprdr.h>
+#include <winpr/user.h>   /* CF_UNICODETEXT / CF_TEXT */
 
 #include <winpr/synch.h>
 #include <winpr/thread.h>
@@ -46,6 +49,7 @@ typedef struct {
     int width;
     int height;
     DispClientContext* disp;
+    CliprdrClientContext* cliprdr;
 } krdp_context;
 
 /// Looks up the typed context from any base context.
@@ -74,6 +78,7 @@ struct krdp_client {
     krdp_frame_cb on_frame;
     krdp_state_cb on_state;
     krdp_credentials_cb on_credentials;
+    krdp_clipboard_cb on_clipboard;
     void* user;
 
     // Credential/authentication flow: the session thread asks, then waits.
@@ -82,6 +87,11 @@ struct krdp_client {
     char* pending_domain;
     char* pending_password;
     bool credentials_aborted;
+
+    // Clipboard: the local text we advertise, guarded because the channel and
+    // the UI thread both touch it.
+    CRITICAL_SECTION clipboard_lock;
+    char* clipboard_text;
 
     freerdp* instance;
     HANDLE thread;
@@ -132,8 +142,249 @@ static BOOL krdp_end_paint(rdpContext* context)
     return TRUE;
 }
 
+// MARK: - Clipboard (cliprdr)
+
+/// Appends the UTF-8 encoding of `cp` at `out`; returns the byte count.
+static size_t krdp_utf8_encode(UINT32 cp, char* out)
+{
+    if (cp < 0x80) {
+        out[0] = (char)cp;
+        return 1;
+    }
+    if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | (cp >> 18));
+    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+/// UTF-16LE (as CF_UNICODETEXT arrives) to a fresh UTF-8 string, or NULL.
+static char* krdp_utf16le_to_utf8(const BYTE* data, UINT32 len)
+{
+    if (!data || len < 2) return NULL;
+    UINT32 units = len / 2;
+    // Windows terminates CF_UNICODETEXT with a NUL; drop it.
+    while (units > 0 && data[(units - 1) * 2] == 0 && data[(units - 1) * 2 + 1] == 0) units--;
+
+    char* out = malloc((size_t)units * 4 + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (UINT32 i = 0; i < units; i++) {
+        UINT32 cp = (UINT32)(data[i * 2] | (data[i * 2 + 1] << 8));
+        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < units) {
+            UINT32 lo = (UINT32)(data[(i + 1) * 2] | (data[(i + 1) * 2 + 1] << 8));
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                i++;
+            }
+        }
+        o += krdp_utf8_encode(cp, out + o);
+    }
+    out[o] = '\0';
+    return out;
+}
+
+/// UTF-8 to a fresh UTF-16LE buffer (with a terminating NUL), or NULL.
+static BYTE* krdp_utf8_to_utf16le(const char* utf8, UINT32* out_len)
+{
+    if (!utf8) return NULL;
+    size_t n = strlen(utf8);
+    BYTE* out = malloc((n + 1) * 2 + 2);
+    if (!out) return NULL;
+    size_t i = 0, o = 0;
+    while (i < n) {
+        UINT32 cp = (unsigned char)utf8[i];
+        size_t extra = 0;
+        if (cp >= 0xF0) { cp &= 0x07; extra = 3; }
+        else if (cp >= 0xE0) { cp &= 0x0F; extra = 2; }
+        else if (cp >= 0xC0) { cp &= 0x1F; extra = 1; }
+        for (size_t k = 1; k <= extra && i + k < n; k++) {
+            cp = (cp << 6) | ((unsigned char)utf8[i + k] & 0x3F);
+        }
+        i += extra + 1;
+        if (cp >= 0x10000) {
+            cp -= 0x10000;
+            UINT16 hi = (UINT16)(0xD800 + (cp >> 10));
+            UINT16 lo = (UINT16)(0xDC00 + (cp & 0x3FF));
+            out[o++] = (BYTE)(hi & 0xFF); out[o++] = (BYTE)(hi >> 8);
+            out[o++] = (BYTE)(lo & 0xFF); out[o++] = (BYTE)(lo >> 8);
+        } else {
+            out[o++] = (BYTE)(cp & 0xFF); out[o++] = (BYTE)(cp >> 8);
+        }
+    }
+    out[o++] = 0; out[o++] = 0;   // terminating NUL, as Windows expects
+    if (out_len) *out_len = (UINT32)o;
+    return out;
+}
+
+/// Tells the server which clipboard formats the local clipboard currently has.
+static UINT krdp_cliprdr_send_format_list(CliprdrClientContext* ctx, bool hasText)
+{
+    CLIPRDR_FORMAT formats[1];
+    memset(formats, 0, sizeof(formats));
+    UINT32 count = 0;
+    if (hasText) {
+        formats[count].formatId = CF_UNICODETEXT;
+        formats[count].formatName = NULL;
+        count++;
+    }
+
+    CLIPRDR_FORMAT_LIST list;
+    memset(&list, 0, sizeof(list));
+    list.common.msgType = CB_FORMAT_LIST;
+    list.common.msgFlags = 0;
+    list.numFormats = count;
+    list.formats = formats;
+    return ctx->ClientFormatList(ctx, &list);
+}
+
+static UINT krdp_cliprdr_monitor_ready(CliprdrClientContext* ctx, const CLIPRDR_MONITOR_READY* monitorReady)
+{
+    (void)monitorReady;
+    // Announce capabilities, then whatever the local clipboard holds. Without
+    // this the channel never becomes usable and nothing can be copied either way.
+    CLIPRDR_GENERAL_CAPABILITY_SET general;
+    memset(&general, 0, sizeof(general));
+    general.capabilitySetType = CB_CAPSTYPE_GENERAL;
+    general.capabilitySetLength = CB_CAPSTYPE_GENERAL_LEN;
+    general.version = CB_CAPS_VERSION_2;
+    general.generalFlags = 0;
+
+    CLIPRDR_CAPABILITIES caps;
+    memset(&caps, 0, sizeof(caps));
+    caps.cCapabilitiesSets = 1;
+    caps.capabilitySets = (CLIPRDR_CAPABILITY_SET*)&general;
+    ctx->ClientCapabilities(ctx, &caps);
+
+    krdp_client* client = (krdp_client*)ctx->custom;
+    bool hasText = false;
+    if (client) {
+        EnterCriticalSection(&client->clipboard_lock);
+        hasText = (client->clipboard_text != NULL);
+        LeaveCriticalSection(&client->clipboard_lock);
+    }
+    return krdp_cliprdr_send_format_list(ctx, hasText);
+}
+
+static UINT krdp_cliprdr_server_capabilities(CliprdrClientContext* ctx, const CLIPRDR_CAPABILITIES* caps)
+{
+    (void)ctx; (void)caps;
+    return CHANNEL_RC_OK;
+}
+
+static UINT krdp_cliprdr_server_format_list(CliprdrClientContext* ctx, const CLIPRDR_FORMAT_LIST* list)
+{
+    CLIPRDR_FORMAT_LIST_RESPONSE response;
+    memset(&response, 0, sizeof(response));
+    response.common.msgType = CB_FORMAT_LIST_RESPONSE;
+    response.common.msgFlags = CB_RESPONSE_OK;
+    ctx->ClientFormatListResponse(ctx, &response);
+
+    // Ask for the content straight away: prefer Unicode, fall back to ANSI.
+    UINT32 wanted = 0;
+    for (UINT32 i = 0; list && i < list->numFormats; i++) {
+        if (list->formats[i].formatId == CF_UNICODETEXT) { wanted = CF_UNICODETEXT; break; }
+        if (list->formats[i].formatId == CF_TEXT && wanted == 0) wanted = CF_TEXT;
+    }
+    if (wanted == 0) return CHANNEL_RC_OK;
+
+    CLIPRDR_FORMAT_DATA_REQUEST request;
+    memset(&request, 0, sizeof(request));
+    request.common.msgType = CB_FORMAT_DATA_REQUEST;
+    request.common.msgFlags = 0;
+    request.requestedFormatId = wanted;
+    return ctx->ClientFormatDataRequest(ctx, &request);
+}
+
+static UINT krdp_cliprdr_server_format_list_response(CliprdrClientContext* ctx,
+                                                     const CLIPRDR_FORMAT_LIST_RESPONSE* response)
+{
+    (void)ctx; (void)response;
+    return CHANNEL_RC_OK;
+}
+
+/// The server asks for the local clipboard's content (the user pressed paste).
+static UINT krdp_cliprdr_server_format_data_request(CliprdrClientContext* ctx,
+                                                    const CLIPRDR_FORMAT_DATA_REQUEST* request)
+{
+    krdp_client* client = (krdp_client*)ctx->custom;
+    BYTE* utf16 = NULL;
+    UINT32 length = 0;
+
+    if (client && request->requestedFormatId == CF_UNICODETEXT) {
+        EnterCriticalSection(&client->clipboard_lock);
+        if (client->clipboard_text) utf16 = krdp_utf8_to_utf16le(client->clipboard_text, &length);
+        LeaveCriticalSection(&client->clipboard_lock);
+    }
+
+    CLIPRDR_FORMAT_DATA_RESPONSE response;
+    memset(&response, 0, sizeof(response));
+    response.common.msgType = CB_FORMAT_DATA_RESPONSE;
+    if (utf16) {
+        response.common.msgFlags = CB_RESPONSE_OK;
+        response.common.dataLen = length;
+        response.requestedFormatData = utf16;
+        ctx->ClientFormatDataResponse(ctx, &response);
+        free(utf16);
+    } else {
+        // Nothing to give, or a format we do not serve: fail explicitly so the
+        // server does not wait for a reply that never comes.
+        response.common.msgFlags = CB_RESPONSE_FAIL;
+        response.common.dataLen = 0;
+        response.requestedFormatData = NULL;
+        ctx->ClientFormatDataResponse(ctx, &response);
+    }
+    return CHANNEL_RC_OK;
+}
+
+/// The content the server sent in answer to our request.
+static UINT krdp_cliprdr_server_format_data_response(CliprdrClientContext* ctx,
+                                                     const CLIPRDR_FORMAT_DATA_RESPONSE* response)
+{
+    krdp_client* client = (krdp_client*)ctx->custom;
+    if (!client || !client->on_clipboard) return CHANNEL_RC_OK;
+
+    char* utf8 = NULL;
+    if ((response->common.msgFlags & CB_RESPONSE_OK) && response->requestedFormatData) {
+        utf8 = krdp_utf16le_to_utf8(response->requestedFormatData, response->common.dataLen);
+    }
+    // An empty string is meaningful: the remote clipboard was cleared.
+    client->on_clipboard(client->user, utf8 ? utf8 : "");
+    free(utf8);
+    return CHANNEL_RC_OK;
+}
+
+void krdp_client_set_clipboard(krdp_client* client, const char* utf8)
+{
+    if (!client) return;
+
+    EnterCriticalSection(&client->clipboard_lock);
+    free(client->clipboard_text);
+    client->clipboard_text = (utf8 && *utf8) ? krdp_strdup(utf8) : NULL;
+    bool hasText = (client->clipboard_text != NULL);
+    krdp_context* ctx = client->instance ? krdp_ctx(client->instance->context) : NULL;
+    CliprdrClientContext* cliprdr = (ctx && ctx->cliprdr) ? ctx->cliprdr : NULL;
+    // Announcing from here (the UI thread) is how FreeRDP's own clients do it;
+    // the channel takes its own lock.
+    if (cliprdr) krdp_cliprdr_send_format_list(cliprdr, hasText);
+    LeaveCriticalSection(&client->clipboard_lock);
+}
+
 // MARK: - Channels (Display Control -> live resize)
 
+/// Wires up the channel contexts the app needs. FreeRDP 3 hands them out through
+/// the ChannelConnected PubSub event.
 static void krdp_channel_connected(void* ctx, const ChannelConnectedEventArgs* e)
 {
     krdp_context* context = krdp_ctx(ctx);
@@ -141,10 +392,29 @@ static void krdp_channel_connected(void* ctx, const ChannelConnectedEventArgs* e
 
     if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0) {
         context->disp = (DispClientContext*)e->pInterface;
+    } else if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
+        CliprdrClientContext* cliprdr = (CliprdrClientContext*)e->pInterface;
+        context->cliprdr = cliprdr;
+        // Set our side of the callbacks; the Client* ones are already populated
+        // by the channel implementation.
+        cliprdr->custom = context->client;
+        cliprdr->MonitorReady = krdp_cliprdr_monitor_ready;
+        cliprdr->ServerCapabilities = krdp_cliprdr_server_capabilities;
+        cliprdr->ServerFormatList = krdp_cliprdr_server_format_list;
+        cliprdr->ServerFormatListResponse = krdp_cliprdr_server_format_list_response;
+        cliprdr->ServerFormatDataRequest = krdp_cliprdr_server_format_data_request;
+        cliprdr->ServerFormatDataResponse = krdp_cliprdr_server_format_data_response;
     }
 }
 
 // MARK: - Context callbacks
+
+/// Whether the client that built `instance` has clipboard redirection on.
+static bool client_wants_clipboard(freerdp* instance)
+{
+    krdp_context* ctx = krdp_ctx(instance->context);
+    return ctx && ctx->client && ctx->client->redirect_clipboard;
+}
 
 static BOOL krdp_context_new(freerdp* instance, rdpContext* context)
 {
@@ -165,6 +435,22 @@ static BOOL krdp_pre_connect(freerdp* instance)
 {
     rdpContext* context = instance->context;
     PubSub_SubscribeChannelConnected(context->pubSub, krdp_channel_connected);
+
+    // Ask for the channels we use by name. This runs before FreeRDP rebuilds the
+    // channel manager (`utils_reload_channels` calls `LoadChannels` afterwards),
+    // so what the settings list here is what actually gets created. The Clipboard
+    // virtual channel is what makes copy/paste work in either direction; Display
+    // Control drives resize.
+    // `add_*_channel` takes the addin lookup name ("disp"), not the DVC wire name
+    // ("Microsoft::Windows::RDS::DisplayControl") — passing the latter makes the
+    // loader fail and takes the whole post-connect down with it.
+    const char* display[] = { DISP_CHANNEL_NAME };
+    if (!freerdp_client_add_dynamic_channel(context->settings, 1, display)) return FALSE;
+    const char* clipboard[] = { CLIPRDR_SVC_CHANNEL_NAME };
+    if (client_wants_clipboard(instance) &&
+        !freerdp_client_add_static_channel(context->settings, 1, clipboard)) {
+        return FALSE;
+    }
     return TRUE;
 }
 
@@ -306,6 +592,7 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
                                 krdp_frame_cb on_frame,
                                 krdp_state_cb on_state,
                                 krdp_credentials_cb on_credentials,
+                                krdp_clipboard_cb on_clipboard,
                                 void* user)
 {
     if (!descriptor || !descriptor->host) return NULL;
@@ -323,6 +610,7 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
 
     krdp_client* client = calloc(1, sizeof(krdp_client));
     if (!client) return NULL;
+    InitializeCriticalSection(&client->clipboard_lock);
 
     client->host = krdp_strdup(descriptor->host);
     client->username = krdp_strdup(descriptor->username);
@@ -341,6 +629,7 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     client->on_frame = on_frame;
     client->on_state = on_state;
     client->on_credentials = on_credentials;
+    client->on_clipboard = on_clipboard;
     client->user = user;
 
     client->instance = freerdp_new();
@@ -355,6 +644,10 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     // Ask for credentials instead of failing silently when none are stored or the
     // stored ones are rejected; the UI answers through krdp_client_supply_credentials.
     client->instance->AuthenticateEx = krdp_authenticate_ex;
+    // FreeRDP rebuilds the channel manager *after* PreConnect and populates it
+    // through this callback, so it must be set or no channel ever goes live.
+    // (`freerdp_context_new` leaves it NULL, unlike `freerdp_client_context_new`.)
+    client->instance->LoadChannels = freerdp_client_load_channels;
     client->credentials_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!client->credentials_event) { krdp_client_destroy(client); return NULL; }
 
@@ -380,6 +673,11 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     // Let the server resize us on demand (drives the Display Control channel).
     freerdp_settings_set_bool(s, FreeRDP_DesktopResize, TRUE);
     freerdp_settings_set_bool(s, FreeRDP_SupportDisplayControl, TRUE);
+    // Use the RDP8 graphics pipeline (progressive / RemoteFX / H.264 via
+    // OpenH264). Without it every frame arrives as a full bitmap over the legacy
+    // GDI path, which is the "frames trickling in" feel on a real desktop.
+    freerdp_settings_set_bool(s, FreeRDP_SupportGraphicsPipeline, TRUE);
+    freerdp_settings_set_bool(s, FreeRDP_GfxH264, TRUE);
     freerdp_settings_set_bool(s, FreeRDP_IgnoreCertificate, client->ignore_certificate ? TRUE : FALSE);
     freerdp_settings_set_bool(s, FreeRDP_RedirectClipboard, client->redirect_clipboard ? TRUE : FALSE);
     freerdp_settings_set_bool(s, FreeRDP_RedirectDrives, client->redirect_drives ? TRUE : FALSE);
@@ -464,6 +762,8 @@ void krdp_client_destroy(krdp_client* client)
         memset(client->password, 0, strlen(client->password));
         free(client->password);
     }
+    DeleteCriticalSection(&client->clipboard_lock);
+    free(client->clipboard_text);
     free(client);
 }
 

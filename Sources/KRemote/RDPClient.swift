@@ -50,12 +50,25 @@ final class RDPClient {
                 self?.answerCredentials(answer)
             }
         }
+        sink.onClipboard = { [weak self] text in
+            self?.onRemoteClipboardText?(text)
+        }
     }
 
     /// Called on the main actor when the server demands credentials the tree did
     /// not supply. The C session thread is blocked until the `answer` closure is
     /// invoked (which routes straight back into `answerCredentials`).
     var onCredentialsNeeded: (@MainActor (String, String, @escaping (RDPCredentialAnswer) -> Void) -> Void)?
+
+    /// Called on the main actor with text the remote clipboard now holds.
+    var onRemoteClipboardText: (@MainActor (String) -> Void)?
+
+    /// Tells the server what the local clipboard holds, enabling paste inside the
+    /// session. An empty string announces an empty clipboard.
+    func setLocalClipboardText(_ text: String) {
+        guard let handle else { return }
+        text.withCString { krdp_client_set_clipboard(handle, $0) }
+    }
 
     /// Answers an outstanding credential request. Safe to call at any time.
     func answerCredentials(_ answer: RDPCredentialAnswer) {
@@ -110,6 +123,11 @@ final class RDPClient {
                 // Runs on the session thread, which then blocks until answered;
                 // hand the request to the main actor and return immediately.
                 Task { @MainActor in sink.deliverCredentials(username: username, domain: domain) }
+            },
+            onClipboard: { text in
+                // FreeRDP's buffer is freed once this returns, so copy it first.
+                let copied = String(cString: text)
+                Task { @MainActor in sink.deliverClipboard(copied) }
             }
         )
         let retained = Unmanaged.passRetained(callbacks)
@@ -154,6 +172,7 @@ final class RDPClient {
                             rdpFrameCallback,
                             rdpStateCallback,
                             rdpCredentialsCallback,
+                            rdpClipboardCallback,
                             pointer
                         )
                     }
@@ -241,6 +260,8 @@ final class RDPBridgeSink {
     /// Set by `RDPClient`, which is the only thing that can route the answer back
     /// into the blocked session thread.
     var onCredentials: ((String, String) -> Void)?
+    /// Text the remote clipboard now holds.
+    var onClipboard: ((String) -> Void)?
 
     func deliverFrame(_ data: Data, width: Int, height: Int, stride: Int) {
         view?.presentFrame(data, width: width, height: height, stride: stride)
@@ -252,6 +273,10 @@ final class RDPBridgeSink {
 
     func deliverCredentials(username: String, domain: String) {
         onCredentials?(username, domain)
+    }
+
+    func deliverClipboard(_ text: String) {
+        onClipboard?(text)
     }
 }
 
@@ -268,15 +293,18 @@ private final class RDPBridgeCallbacks: Sendable {
     let onFrame: @Sendable (UnsafePointer<UInt8>?, Int, Int, Int) -> Void
     let onState: @Sendable (krdp_state, String?) -> Void
     let onCredentials: @Sendable (String, String) -> Void
+    let onClipboard: @Sendable (UnsafePointer<CChar>) -> Void
 
     init(
         onFrame: @escaping @Sendable (UnsafePointer<UInt8>?, Int, Int, Int) -> Void,
         onState: @escaping @Sendable (krdp_state, String?) -> Void,
-        onCredentials: @escaping @Sendable (String, String) -> Void
+        onCredentials: @escaping @Sendable (String, String) -> Void,
+        onClipboard: @escaping @Sendable (UnsafePointer<CChar>) -> Void
     ) {
         self.onFrame = onFrame
         self.onState = onState
         self.onCredentials = onCredentials
+        self.onClipboard = onClipboard
     }
 }
 
@@ -315,6 +343,15 @@ private func rdpCredentialsCallback(
         username.map { String(cString: $0) } ?? "",
         domain.map { String(cString: $0) } ?? ""
     )
+}
+
+private func rdpClipboardCallback(
+    _ user: UnsafeMutableRawPointer?,
+    _ utf8: UnsafePointer<CChar>?
+) {
+    guard let user, let utf8 else { return }
+    let callbacks = Unmanaged<RDPBridgeCallbacks>.fromOpaque(user).takeUnretainedValue()
+    callbacks.onClipboard(utf8)
 }
 
 private extension RDPClient.MouseButton {

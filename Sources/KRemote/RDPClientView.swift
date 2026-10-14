@@ -73,6 +73,7 @@ struct RDPClientView: NSViewRepresentable {
 
         private weak var view: RDPHostView?
         private var client: RDPClient?
+        private var clipboard: RDPClipboardBridge?
         private var focusMonitor: Any?
         private var onFocus: (@MainActor () -> Void)?
         /// Set by the pane so credential requests reach the UI.
@@ -111,6 +112,14 @@ struct RDPClientView: NSViewRepresentable {
                 Task { @MainActor in onStateChange(state) }
             })
             client.onCredentialsNeeded = onCredentialsNeeded
+            // Keep clipboard text flowing both ways while this pane owns the
+            // session; the bridge stops polling when it goes away.
+            let clipboard = RDPClipboardBridge(client: client)
+            client.onRemoteClipboardText = { [weak clipboard] text in
+                clipboard?.applyRemoteText(text)
+            }
+            clipboard.start()
+            self.clipboard = clipboard
             self.client = client
             view.attach(client: client)
 
@@ -134,9 +143,73 @@ struct RDPClientView: NSViewRepresentable {
                 NSEvent.removeMonitor(focusMonitor)
                 self.focusMonitor = nil
             }
+            clipboard?.stop()
+            clipboard = nil
             client?.disconnect()
             client = nil
         }
+    }
+}
+
+/// Mirrors text between the macOS pasteboard and the remote clipboard.
+///
+/// FreeRDP's clipboard channel is event-driven, but macOS gives no reliable
+/// "clipboard changed" notification that covers every source, so the local side
+/// is polled: cheap, and it keeps both directions working without the app having
+/// to become a pasteboard server.
+@MainActor
+final class RDPClipboardBridge {
+    /// What we last pushed to the remote side, so polling does not re-announce
+    /// our own echoes (which would ping-pong between the two ends).
+    private var lastSentText: String?
+    private var timer: Timer?
+    private weak var client: RDPClient?
+
+    /// The remote clipboard is only ours while this pane is frontmost, so the
+    /// pasteboard is not silently overwritten by a background session.
+    private var ownsPasteboard: Bool {
+        NSApp.isActive && (NSApp.keyWindow?.firstResponder is RDPHostView)
+    }
+
+    init(client: RDPClient) {
+        self.client = client
+    }
+
+    func start() {
+        guard let client else { return }
+        // Announce whatever the user already had copied, so paste works right away.
+        let initial = NSPasteboard.general.string(forType: .string)
+        lastSentText = initial
+        if let initial, !initial.isEmpty { client.setLocalClipboardText(initial) }
+        // Cancels the eyes-closed situation where a poller dies with the view.
+        timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.poll() }
+        }
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        client = nil
+    }
+
+    /// Pushes local clipboard changes to the server.
+    private func poll() {
+        guard let client, ownsPasteboard else { return }
+        let current = NSPasteboard.general.string(forType: .string) ?? ""
+        guard current != lastSentText else { return }
+        lastSentText = current
+        client.setLocalClipboardText(current)
+    }
+
+    /// Applies text the server sent. `lastSentText` is updated so the next poll
+    /// does not bounce it straight back.
+    func applyRemoteText(_ text: String) {
+        lastSentText = text
+        guard ownsPasteboard else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 }
 

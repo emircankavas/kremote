@@ -234,9 +234,17 @@ private struct SessionContent: View {
     var body: some View {
         VStack(spacing: 0) {
             if showPaneChrome { paneHeader }
-            statusBar
-            Divider()
-            terminal
+            // The status bar outside tracks `SSHPtySession.State`, which an RDP
+            // session never updates — it would sit on "Idle" forever. The RDP
+            // branch draws its own bar instead, so skipping this one is also what
+            // removes the second, stale bar the pane used to show.
+            if isRDP {
+                terminal
+            } else {
+                statusBar
+                Divider()
+                terminal
+            }
         }
         .background(.background)
         .overlay(
@@ -247,6 +255,12 @@ private struct SessionContent: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: onFocus)
+    }
+
+    /// An RDP session, which supplies its own chrome.
+    private var isRDP: Bool {
+        guard let node = model.find(session.nodeID) else { return false }
+        return !node.supportsSSH && node.supportsRDP
     }
 
     @ViewBuilder
@@ -278,6 +292,7 @@ private struct SessionContent: View {
             RDPSessionContent(
                 nodeID: node.id,
                 session: session,
+                showPaneChrome: showPaneChrome,
                 onFocus: { model.focus(session.id) },
                 onClose: { model.closeSession(session.id) }
             )
@@ -414,6 +429,7 @@ private struct RDPSessionContent: View {
     @Environment(AppModel.self) private var model
     let nodeID: ConnectionNode.ID
     let session: Session
+    let showPaneChrome: Bool
     /// `@MainActor` matches `RDPClientView`'s callback types; SwiftUI views are
     /// main-actor isolated, so the literals at the call site satisfy this.
     let onFocus: @MainActor () -> Void
@@ -432,6 +448,10 @@ private struct RDPSessionContent: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // This pane draws all of its own chrome: the header in split mode and
+            // always its status bar, since the outer `SessionContent` bar tracks
+            // SSH state and would read "Idle" for an RDP session.
+            if showPaneChrome { paneHeader }
             statusBar
             Divider()
             content
@@ -439,25 +459,23 @@ private struct RDPSessionContent: View {
         .background(.background)
         .contentShape(Rectangle())
         .onTapGesture(perform: onFocus)
-        .sheet(item: loginRequest) { request in
-            RDPLoginSheet(request: request) { username, domain, password in
-                model.supplyRDPCredentials(
-                    username: username,
-                    domain: domain,
-                    password: password
-                )
-            } onCancel: {
-                model.cancelRDPCredentials()
-            }
-        }
     }
 
-    /// The sheet is only offered while this pane's session is the one asking.
-    private var loginRequest: Binding<RDPCredentialRequest?> {
-        Binding(
-            get: { model.pendingRDPLogin },
-            set: { if $0 == nil { model.pendingRDPLogin = nil } }
-        )
+    private var paneHeader: some View {
+        HStack(spacing: 6) {
+            Menu(session.displayTitle) {
+                ForEach(model.sessions) { candidate in
+                    Button(candidate.displayTitle) { model.assign(candidate.id, toTileShowing: session.id) }
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .font(.caption)
+            .fixedSize()
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .background(Color(nsColor: .controlBackgroundColor))
     }
 
     @ViewBuilder

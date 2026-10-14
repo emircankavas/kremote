@@ -35,6 +35,10 @@ typedef void (*krdp_state_cb)(void* user, krdp_state state, const char* message)
 /// `username` / `domain` are the values currently in use, for pre-filling.
 typedef void (*krdp_credentials_cb)(void* user, const char* username, const char* domain);
 
+/// Reports a clipboard event from the remote side. Runs on the session thread;
+/// Swift copies the text and touches NSPasteboard on the main actor.
+typedef void (*krdp_clipboard_cb)(void* user, const char* utf8);
+
 typedef struct {
     const char* host;
     uint16_t port;
@@ -67,7 +71,12 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
                                 krdp_frame_cb on_frame,
                                 krdp_state_cb on_state,
                                 krdp_credentials_cb on_credentials,
+                                krdp_clipboard_cb on_clipboard,
                                 void* user);
+
+/// Announces the local clipboard's text to the server. Pass NULL to announce an
+/// empty clipboard. Safe to call at any time; a no-op before the channel is up.
+void krdp_client_set_clipboard(krdp_client* client, const char* utf8);
 
 /// Answers an outstanding `krdp_credentials_cb`. Both strings are copied; pass
 /// NULL for the password to abort (returns the connection failure). Safe to call

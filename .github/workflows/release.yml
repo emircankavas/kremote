@@ -162,11 +162,10 @@ jobs:
 
       - name: Write release notes
         run: |
-          cat > RELEASE_NOTES.md <<'EOF'
-          ## KRemote ${{ steps.version.outputs.tag }}
-
-          Native macOS remote connection manager — SSH sessions, a connection tree
-          with folder credential inheritance and mRemoteNG `confCons.xml` import.
+          # The curated body lives in the repo; add the per-tag install footer to
+          # it so both are on the release page.
+          cat RELEASE_NOTES.md > /tmp/notes.md
+          cat >> /tmp/notes.md <<'EOF'
 
           ### Install
           1. Download `KRemote-${{ steps.version.outputs.version }}.dmg` and open it.
@@ -178,6 +177,7 @@ jobs:
 
           Then open it normally.
           EOF
+          mv /tmp/notes.md RELEASE_NOTES.md
 
       - name: Publish release
         uses: softprops/action-gh-release@v3
@@ -185,7 +185,9 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: KRemote ${{ steps.version.outputs.tag }}
           body_path: RELEASE_NOTES.md
-          generate_release_notes: true
+          # Release notes are the curated file from the repository, not a raw
+          # commit dump.
+          generate_release_notes: false
           fail_on_unmatched_files: true
           files: |
             KRemote-${{ steps.version.outputs.version }}.dmg
