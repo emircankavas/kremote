@@ -18,7 +18,7 @@ jobs:
     # (GitHub bills 10x for hosted macOS). See docs/SELF_HOSTED_RUNNER.md.
     runs-on: [self-hosted, macOS, ARM64]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Show toolchain
         run: |
@@ -80,7 +80,7 @@ jobs:
             KRemote-debug.zip
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: KRemote-debug
           path: KRemote-debug.zip
