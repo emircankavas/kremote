@@ -188,37 +188,32 @@ static DWORD WINAPI krdp_thread(LPVOID arg)
 
     report_state(client, KRDP_STATE_CONNECTING, NULL);
 
-    if (!freerdp_connect(instance)) {
+    if (freerdp_connect(instance)) {
+        report_state(client, KRDP_STATE_CONNECTED, NULL);
+
+        // Poll for a stop request instead of blocking, so the session keeps
+        // draining the socket. While connected the only definitive end is
+        // FreeRDP asking to disconnect (the server dropped us, or `disconnect`
+        // was called); a transient error is tolerated rather than treated as
+        // fatal, so a hiccup cannot kill a live session.
+        while (client->running) {
+            if (WaitForSingleObject(client->stop_event, 50) == WAIT_OBJECT_0) break;
+            if (freerdp_shall_disconnect_context(context)) break;
+            (void)freerdp_check_event_handles(context);
+        }
+    } else {
         UINT32 last = freerdp_get_last_error(context);
         const char* name = freerdp_get_last_error_string(last);
-        char message[256];
-        snprintf(message, sizeof(message), "%s", name ? name : "connection failed");
-        report_state(client, KRDP_STATE_FAILED, message);
+        report_state(client, KRDP_STATE_FAILED, name ? name : "connection failed");
         return 0;
     }
 
-    report_state(client, KRDP_STATE_CONNECTED, NULL);
-
-    while (client->running) {
-        if (WaitForSingleObject(client->stop_event, 0) == WAIT_OBJECT_0) break;
-        if (!freerdp_check_event_handles(context)) {
-            UINT32 last = freerdp_get_last_error(context);
-            const char* name = freerdp_get_last_error_string(last);
-            if (freerdp_shall_disconnect_context(context) || freerdp_get_last_error(context) != 0) {
-                if (name && *name) report_state(client, KRDP_STATE_FAILED, name);
-                break;
-            }
-        }
-        if (freerdp_shall_disconnect_context(context)) break;
-    }
-
-    if (client->running) {
-        freerdp_disconnect(instance);
-        report_state(client, KRDP_STATE_DISCONNECTED, NULL);
-    } else {
-        freerdp_disconnect(instance);
-        report_state(client, KRDP_STATE_DISCONNECTED, NULL);
-    }
+    // Report a reason when the server dropped us, so the pane keeps the tab and
+    // shows why instead of closing silently; a clean local stop passes nil.
+    UINT32 last = freerdp_get_last_error(context);
+    const char* name = (last != 0) ? freerdp_get_last_error_string(last) : NULL;
+    freerdp_disconnect(instance);
+    report_state(client, KRDP_STATE_DISCONNECTED, (name && *name) ? name : NULL);
     return 0;
 }
 
@@ -404,7 +399,25 @@ void krdp_client_mouse(krdp_client* client, int x, int y, int button, bool is_do
     if (!client || !client->instance) return;
     rdpInput* input = client->instance->context->input;
     if (!input) return;
-    input->MouseEvent(input, is_down ? PTR_FLAGS_DOWN : 0, x, y);
+
+    // RDP requires the button bit on BOTH the press and the release. Sending a
+    // press with only PTR_FLAGS_DOWN (no button) is a protocol violation the
+    // server answers by dropping the connection — which is exactly what a click
+    // used to do. This mirrors FreeRDP's own macOS client (mf_press_mouse_button).
+    UINT16 flags;
+    switch (button) {
+    case 1: flags = PTR_FLAGS_BUTTON1; break;
+    case 2: flags = PTR_FLAGS_BUTTON2; break;
+    case 4: flags = PTR_FLAGS_BUTTON3; break;
+    default:
+        // No button (e.g. a plain move) -> a bare move is always well-formed.
+        freerdp_input_send_mouse_event(input, PTR_FLAGS_MOVE, (UINT16)x, (UINT16)y);
+        return;
+    }
+    if (is_down) flags |= PTR_FLAGS_DOWN;
+    // The public helper (rather than input->MouseEvent) also updates FreeRDP's
+    // last-event bookkeeping, which keeps the client and server state in sync.
+    freerdp_input_send_mouse_event(input, flags, (UINT16)x, (UINT16)y);
 }
 
 void krdp_client_mouse_move(krdp_client* client, int x, int y)
@@ -412,7 +425,7 @@ void krdp_client_mouse_move(krdp_client* client, int x, int y)
     if (!client || !client->instance) return;
     rdpInput* input = client->instance->context->input;
     if (!input) return;
-    input->MouseEvent(input, PTR_FLAGS_MOVE, x, y);
+    freerdp_input_send_mouse_event(input, PTR_FLAGS_MOVE, (UINT16)x, (UINT16)y);
 }
 
 void krdp_client_scroll(krdp_client* client, int delta_x, int delta_y)
@@ -426,7 +439,7 @@ void krdp_client_scroll(krdp_client* client, int delta_x, int delta_y)
         if (amount > 0) flags |= PTR_FLAGS_WHEEL_NEGATIVE;
         if (amount > 255) amount = 255;
         if (amount < -255) amount = -255;
-        input->MouseEvent(input, flags, 0, (UINT16)(abs(amount) & 0xFF));
+        freerdp_input_send_mouse_event(input, flags, 0, (UINT16)(abs(amount) & 0xFF));
     }
     if (delta_x != 0) {
         UINT16 flags = PTR_FLAGS_HWHEEL;
@@ -434,7 +447,7 @@ void krdp_client_scroll(krdp_client* client, int delta_x, int delta_y)
         if (amount > 0) flags |= PTR_FLAGS_WHEEL_NEGATIVE;
         if (amount > 255) amount = 255;
         if (amount < -255) amount = -255;
-        input->MouseEvent(input, flags, 0, (UINT16)(abs(amount) & 0xFF));
+        freerdp_input_send_mouse_event(input, flags, 0, (UINT16)(abs(amount) & 0xFF));
     }
 }
 
@@ -445,7 +458,7 @@ void krdp_client_key(krdp_client* client, uint16_t scancode, bool extended, bool
     if (!input) return;
     UINT16 flags = is_down ? 0 : KBD_FLAGS_RELEASE;
     if (extended) flags |= KBD_FLAGS_EXTENDED;
-    input->KeyboardEvent(input, flags, scancode);
+    freerdp_input_send_keyboard_event(input, flags, (UINT8)scancode);
 }
 
 // MARK: - macOS -> PC scancode table
