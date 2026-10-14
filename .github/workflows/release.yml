@@ -56,6 +56,26 @@ jobs:
             xcodegen --version
           }
 
+      - name: Cache FreeRDP build
+        uses: actions/cache@v4
+        with:
+          path: |
+            hermes-build/freerdp-install
+            hermes-build/freerdp-build
+          key: freerdp-${{ runner.os }}-${{ runner.arch }}-3.32.2-openh264
+
+      - name: Build FreeRDP (permissive, OpenH264, no ffmpeg)
+        run: |
+          set -o pipefail
+          # Homebrew provides the build deps (cmake/ninja/pkgconf + openssl,
+          # openh264, jansson, uriparser, jpeg-turbo), NOT freerdp itself: its
+          # bottle hard-depends on GPL-3.0 ffmpeg and pulls in X11/SDL/USB.
+          export PATH="/opt/homebrew/bin:$PATH"
+          brew list --versions cmake ninja pkgconf openh264 jansson uriparser jpeg-turbo openssl@4 >/dev/null 2>&1 || \
+            brew install cmake ninja pkgconf openh264 jansson uriparser jpeg-turbo openssl@4
+          # Built from source so nothing GPL-3.0 is embedded. ~10 MB of libraries.
+          bash scripts/build-freerdp.sh "$HOME/hermes-build/freerdp-install"
+
       - name: Generate Xcode project
         run: |
           set -o pipefail
@@ -77,26 +97,6 @@ jobs:
             ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO \
             build
-
-      - name: Cache FreeRDP build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ runner.home }}/hermes-build/freerdp-install
-            ${{ runner.home }}/hermes-build/freerdp-build
-          key: freerdp-${{ runner.os }}-${{ runner.arch }}-3.32.2-openh264
-
-      - name: Build FreeRDP (permissive, OpenH264, no ffmpeg)
-        run: |
-          set -o pipefail
-          # Homebrew provides the build deps (cmake/ninja/pkgconf + openssl,
-          # openh264, jansson, uriparser, jpeg-turbo), NOT freerdp itself: its
-          # bottle hard-depends on GPL-3.0 ffmpeg and pulls in X11/SDL/USB.
-          export PATH="/opt/homebrew/bin:$PATH"
-          brew list --versions cmake ninja pkgconf openh264 jansson uriparser jpeg-turbo openssl@4 >/dev/null 2>&1 || \
-            brew install cmake ninja pkgconf openh264 jansson uriparser jpeg-turbo openssl@4
-          # Built from source so nothing GPL-3.0 is embedded. ~10 MB of libraries.
-          bash scripts/build-freerdp.sh "$HOME/hermes-build/freerdp-install"
 
       - name: Verify the bundle was produced
         run: |

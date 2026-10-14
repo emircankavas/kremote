@@ -1,0 +1,4 @@
+# Shell scripts run under bash on macOS; a CRLF shebang line breaks them.
+*.sh text eol=lf
+# Generated project files are never committed.
+*.xcodeproj binary
