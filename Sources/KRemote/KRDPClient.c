@@ -30,6 +30,7 @@
 #include <freerdp/client/channels.h>
 #include <freerdp/client/disp.h>
 #include <freerdp/client/cliprdr.h>
+#include <freerdp/client/client_cliprdr_file.h>
 #include <freerdp/client/rdpgfx.h>
 #include <freerdp/channels/rdpgfx.h>
 #include <freerdp/channels/cliprdr.h>
@@ -104,13 +105,13 @@ struct krdp_client {
     CRITICAL_SECTION clipboard_lock;
     char* clipboard_text;
 
-    // File clipboard (Mac -> remote). Each entry is one absolute local path; the
-    // server asks for it by index and we stream it in `cbRequested` chunks.
+    // File clipboard (Mac -> remote). Each entry is one absolute local path.
     char** clipboard_files;
     int clipboard_file_count;
-    // Remote -> Mac is not advertised: FreeRDP routes incoming files through a
-    // FUSE mount, which the macOS build has no support for, so claiming it would
-    // create a paste that silently does nothing.
+    /// FreeRDP's file-clipboard helper. It owns the file handles, answers the
+    /// lock/unlock and FILECONTENTS messages, and claims `cliprdr->custom`.
+    /// Remote -> Mac is not supported: that path needs FUSE, absent here.
+    CliprdrFileContext* cliprdr_file;
 
     freerdp* instance;
     HANDLE thread;
@@ -249,6 +250,23 @@ static BYTE* krdp_utf8_to_utf16le(const char* utf8, UINT32* out_len)
 
 // MARK: - File clipboard (Mac -> remote)
 
+/// The format name Windows uses for a file list. FreeRDP's clipboard layer keys
+/// its file handling off this exact string (`xf_cliprdr.c` does the same), and a
+/// server only offers the paste path when the name is present.
+static const char krdp_file_descriptor_name[] = "FileGroupDescriptorW";
+
+/// Our client, reached through the clipboard channel's context.
+///
+/// `cliprdr_file_context_init` claims `cliprdr->custom` for the file context, so
+/// the client travels the other way: it is the `void*` handed to
+/// `cliprdr_file_context_new`, and comes back out through
+/// `cliprdr_file_context_get_context`.
+static krdp_client* krdp_client_from_cliprdr(CliprdrClientContext* ctx)
+{
+    CliprdrFileContext* file = ctx ? (CliprdrFileContext*)ctx->custom : NULL;
+    return file ? (krdp_client*)cliprdr_file_context_get_context(file) : NULL;
+}
+
 /// Builds a `CLIPRDR_FILELIST` (MS-RDPECLIP 2.2.5.2.3) describing the currently
 /// advertised local files, or NULL when there are none. The caller frees it.
 static BYTE* krdp_build_file_list(krdp_client* client, UINT32* out_len)
@@ -300,10 +318,13 @@ static BYTE* krdp_build_file_list(krdp_client* client, UINT32* out_len)
         free(descriptors);
         return NULL;
     }
-    // FD_UNICODE tells the server the names are UTF-16.
+    // Mirror the flags the server negotiated, as the reference client does; the
+    // server rejects a list whose format does not match what was agreed.
+    CliprdrFileContext* file = client->cliprdr_file;
+    const UINT32 flags = file ? cliprdr_file_context_remote_get_flags(file) : FD_UNICODE;
     BYTE* serialized = NULL;
     UINT32 length = 0;
-    const UINT status = cliprdr_serialize_file_list_ex(FD_UNICODE, descriptors,
+    const UINT status = cliprdr_serialize_file_list_ex(flags, descriptors,
                                                        (UINT32)kept, &serialized, &length);
     free(descriptors);
     if (status != CHANNEL_RC_OK || !serialized) return NULL;
@@ -311,68 +332,37 @@ static BYTE* krdp_build_file_list(krdp_client* client, UINT32* out_len)
     return serialized;
 }
 
-/// Streams one file the server asked for. `cbRequested` selects a size query or
-/// a byte range; `nPosition` is an offset (or a size selector) depending on it.
-static UINT krdp_send_file_contents(CliprdrClientContext* ctx,
-                                    const CLIPRDR_FILE_CONTENTS_REQUEST* request)
+/// Builds the `text/uri-list` body `cliprdr_file_context` expects and hands it
+/// over. That layer parses it into files, keeps the handles, and answers the
+/// lock/unlock and FILECONTENTS messages the server sends — work that has to live
+/// there rather than here, or the server waits on a reply nobody sends.
+static void krdp_update_file_context(krdp_client* client)
 {
-    krdp_client* client = (krdp_client*)ctx->custom;
-    BYTE* payload = NULL;
-    UINT32 length = 0;
-    UINT32 streamId = request->streamId;
+    if (!client || !client->cliprdr_file) return;
 
-    EnterCriticalSection(&client->clipboard_lock);
-    const char* path = NULL;
-    if (request->listIndex < (UINT32)client->clipboard_file_count) {
-        path = client->clipboard_files[request->listIndex];
+    // A URI list, one `file://…` per line. This is the format FreeRDP's file
+    // context parses (`cliprdr_local_stream_update`).
+    size_t capacity = 16;
+    for (int i = 0; i < client->clipboard_file_count; i++) {
+        capacity += strlen(client->clipboard_files[i]) + 12;
     }
-    FILE* f = path ? fopen(path, "rb") : NULL;
-    LeaveCriticalSection(&client->clipboard_lock);
-
-    if (request->dwFlags == FILECONTENTS_SIZE) {
-        // Reply with the file size as a 64-bit value.
-        long size = 0;
-        if (f) {
-            if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
-            fclose(f);
-        }
-        payload = calloc(1, 8);
-        if (payload) {
-            const UINT64 v = (UINT64)(size < 0 ? 0 : size);
-            memcpy(payload, &v, 8);
-            length = 8;
-        }
-    } else if (request->dwFlags == FILECONTENTS_RANGE && f) {
-        const UINT64 offset = ((UINT64)request->nPositionHigh << 32) | request->nPositionLow;
-        if (fseek(f, (long)offset, SEEK_SET) == 0 && request->cbRequested > 0) {
-            payload = malloc(request->cbRequested);
-            if (payload) {
-                const size_t read = fread(payload, 1, request->cbRequested, f);
-                length = (UINT32)read;
-            }
-        }
-        fclose(f);
-    } else if (f) {
-        fclose(f);
+    char* list = calloc(1, capacity);
+    if (!list) return;
+    for (int i = 0; i < client->clipboard_file_count; i++) {
+        strcat(list, "file://");
+        strcat(list, client->clipboard_files[i]);   // absolute, so file:///…
+        strcat(list, "\r\n");
     }
-
-    CLIPRDR_FILE_CONTENTS_RESPONSE response;
-    memset(&response, 0, sizeof(response));
-    response.common.msgType = CB_FILECONTENTS_RESPONSE;
-    response.common.dataLen = length;
-    response.common.msgFlags = length > 0 ? CB_RESPONSE_OK : CB_RESPONSE_FAIL;
-    response.streamId = streamId;
-    response.cbRequested = length;
-    response.requestedData = payload;
-    const UINT status = ctx->ClientFileContentsResponse(ctx, &response);
-    free(payload);
-    return status;
+    cliprdr_file_context_update_client_data(client->cliprdr_file, list, strlen(list));
+    free(list);
 }
 
 /// Announces the local clipboard's current formats. Files, when present, are
-/// offered as `CF_HDROP` with a packed file list; text keeps its own entry.
+/// offered under the file-list format name; text keeps its own entry.
 static UINT krdp_cliprdr_send_format_list(CliprdrClientContext* ctx, bool hasText)
 {
+    krdp_client* client = krdp_client_from_cliprdr(ctx);
+
     CLIPRDR_FORMAT formats[2];
     memset(formats, 0, sizeof(formats));
     UINT32 count = 0;
@@ -381,23 +371,20 @@ static UINT krdp_cliprdr_send_format_list(CliprdrClientContext* ctx, bool hasTex
         formats[count].formatName = NULL;
         count++;
     }
+    if (client && client->clipboard_file_count > 0) {
+        // Advertised by *name*: a server will not paste a file list offered only
+        // under a numeric id. It then asks for the list with a normal
+        // CB_FORMAT_DATA_REQUEST, which `krdp_cliprdr_server_format_data_request`
+        // answers, and pulls the bytes through the file context.
+        formats[count].formatId = CF_HDROP;
+        formats[count].formatName = (char*)krdp_file_descriptor_name;
+        count++;
+    }
 
-    krdp_client* client = (krdp_client*)ctx->custom;
     CLIPRDR_FORMAT_LIST list;
     memset(&list, 0, sizeof(list));
     list.common.msgType = CB_FORMAT_LIST;
     list.common.msgFlags = 0;
-
-    if (client && client->clipboard_file_count > 0) {
-        // Offer CF_HDROP alongside the text. The packed file list is *not* sent
-        // inline: a server asks for it with a normal CB_FORMAT_DATA_REQUEST for
-        // this format id, and `krdp_cliprdr_server_format_data_request` answers
-        // with the list. Advertising the id is what makes files paste-able.
-        formats[count].formatId = CF_HDROP;
-        formats[count].formatName = NULL;
-        count++;
-    }
-
     list.numFormats = count;
     list.formats = formats;
     return ctx->ClientFormatList(ctx, &list);
@@ -406,6 +393,8 @@ static UINT krdp_cliprdr_send_format_list(CliprdrClientContext* ctx, bool hasTex
 static UINT krdp_cliprdr_monitor_ready(CliprdrClientContext* ctx, const CLIPRDR_MONITOR_READY* monitorReady)
 {
     (void)monitorReady;
+    krdp_client* client = krdp_client_from_cliprdr(ctx);
+
     // Announce capabilities, then whatever the local clipboard holds. Without
     // this the channel never becomes usable and nothing can be copied either way.
     CLIPRDR_GENERAL_CAPABILITY_SET general;
@@ -413,9 +402,13 @@ static UINT krdp_cliprdr_monitor_ready(CliprdrClientContext* ctx, const CLIPRDR_
     general.capabilitySetType = CB_CAPSTYPE_GENERAL;
     general.capabilitySetLength = CB_CAPSTYPE_GENERAL_LEN;
     general.version = CB_CAPS_VERSION_2;
-    // Streaming file copy is the capability that lets the server pull file
-    // contents from us in chunks; without it files are never pasted.
-    general.generalFlags = CB_STREAM_FILECLIP_ENABLED;
+    // Long format names are what let us name the file format; the file context
+    // contributes the streaming/lock flags it actually supports. Both are needed
+    // for the server to offer a file paste at all.
+    general.generalFlags = CB_USE_LONG_FORMAT_NAMES;
+    if (client && client->cliprdr_file) {
+        general.generalFlags |= cliprdr_file_context_current_flags(client->cliprdr_file);
+    }
 
     CLIPRDR_CAPABILITIES caps;
     memset(&caps, 0, sizeof(caps));
@@ -423,7 +416,6 @@ static UINT krdp_cliprdr_monitor_ready(CliprdrClientContext* ctx, const CLIPRDR_
     caps.capabilitySets = (CLIPRDR_CAPABILITY_SET*)&general;
     ctx->ClientCapabilities(ctx, &caps);
 
-    krdp_client* client = (krdp_client*)ctx->custom;
     bool hasText = false;
     if (client) {
         EnterCriticalSection(&client->clipboard_lock);
@@ -474,7 +466,7 @@ static UINT krdp_cliprdr_server_format_list_response(CliprdrClientContext* ctx,
 static UINT krdp_cliprdr_server_format_data_request(CliprdrClientContext* ctx,
                                                     const CLIPRDR_FORMAT_DATA_REQUEST* request)
 {
-    krdp_client* client = (krdp_client*)ctx->custom;
+    krdp_client* client = krdp_client_from_cliprdr(ctx);
     BYTE* data = NULL;
     UINT32 length = 0;
 
@@ -483,9 +475,9 @@ static UINT krdp_cliprdr_server_format_data_request(CliprdrClientContext* ctx,
         if (client->clipboard_text) data = krdp_utf8_to_utf16le(client->clipboard_text, &length);
         LeaveCriticalSection(&client->clipboard_lock);
     } else if (client && request->requestedFormatId == CF_HDROP) {
-        // The packed file list (or a single DROPFILES struct, depending on
-        // whether it is one or many files) answers the request for the file
-        // format; the server then streams each file via CB_FILECONTENTS_*.
+        // The packed file list answers the request for the file format; the
+        // server then pulls each file's bytes through the file context, which
+        // answers CB_FILECONTENTS_* on our behalf.
         data = krdp_build_file_list(client, &length);
     }
 
@@ -509,27 +501,11 @@ static UINT krdp_cliprdr_server_format_data_request(CliprdrClientContext* ctx,
     return CHANNEL_RC_OK;
 }
 
-/// The server wants a file we announced: first its size, then byte ranges.
-static UINT krdp_cliprdr_server_file_contents_request(CliprdrClientContext* ctx,
-                                                      const CLIPRDR_FILE_CONTENTS_REQUEST* request)
-{
-    if (!ctx || !ctx->custom || !request) return CHANNEL_RC_OK;
-    return krdp_send_file_contents(ctx, request);
-}
-
-/// Never happens: we do not advertise incoming files (see the client struct).
-static UINT krdp_cliprdr_server_file_contents_response(CliprdrClientContext* ctx,
-                                                       const CLIPRDR_FILE_CONTENTS_RESPONSE* response)
-{
-    (void)ctx; (void)response;
-    return CHANNEL_RC_OK;
-}
-
 /// The content the server sent in answer to our request.
 static UINT krdp_cliprdr_server_format_data_response(CliprdrClientContext* ctx,
                                                      const CLIPRDR_FORMAT_DATA_RESPONSE* response)
 {
-    krdp_client* client = (krdp_client*)ctx->custom;
+    krdp_client* client = krdp_client_from_cliprdr(ctx);
     if (!client || !client->on_clipboard) return CHANNEL_RC_OK;
 
     char* utf8 = NULL;
@@ -580,6 +556,16 @@ void krdp_client_set_clipboard_files(krdp_client* client, const char* const* pat
         }
     }
 
+    // Hand the new list to FreeRDP's file context before announcing, so the
+    // handles exist by the time the server asks for bytes.
+    if (client->cliprdr_file) {
+        if (client->clipboard_file_count > 0) {
+            krdp_update_file_context(client);
+        } else {
+            cliprdr_file_context_clear(client->cliprdr_file);
+        }
+    }
+
     bool hasText = (client->clipboard_text != NULL);
     krdp_context* ctx = client->instance ? krdp_ctx(client->instance->context) : NULL;
     CliprdrClientContext* cliprdr = (ctx && ctx->cliprdr) ? ctx->cliprdr : NULL;
@@ -614,41 +600,24 @@ static BOOL krdp_desktop_resize(rdpContext* context)
 }
 
 /// Called by the GDI graphics pipeline once a surface has been drawn into the
-/// GDI framebuffer. This is the GFX equivalent of `EndPaint`: hand the finished
-/// buffer to Swift exactly like the legacy path does, so both pipelines feed the
-/// same drawing code.
+/// GDI framebuffer.
 ///
-/// The base callback (`gdi_UpdateSurfaces`) must run first — it is what decodes
-/// and blits each surface into `primary_buffer`. Only then is there a picture to
-/// hand over.
+/// **This is not where frames are handed to Swift.** `gdi_OutputUpdate` (the base
+/// callback below) already calls `update_end_paint` after blitting each surface,
+/// and `EndPaint` is hooked in `krdp_end_paint`. Sending the buffer here as well
+/// made every frame be copied and drawn twice, which is what made a busy desktop
+/// stutter. This override exists only to run the base blit; the frame leaves via
+/// `EndPaint`.
 static UINT krdp_gfx_UpdateSurfaces(RdpgfxClientContext* context)
 {
     // `gdi_graphics_pipeline_init` sets `gfx->custom` to the rdpGdi, not to our
-    // typed context, so reach the client through the GDI's rdpContext (our
-    // krdp_context *is* an rdpContext, so the cast is the reverse of usual).
+    // typed context, so reach the base callback through the GDI's rdpContext.
     rdpGdi* gdi = context ? (rdpGdi*)context->custom : NULL;
     krdp_context* ctx = gdi ? krdp_ctx(gdi->context) : NULL;
     if (!ctx) return CHANNEL_RC_OK;
 
     if (ctx->gfx_base_update_surfaces) {
-        const UINT status = ctx->gfx_base_update_surfaces(context);
-        if (status != CHANNEL_RC_OK) return status;
-    }
-
-    krdp_client* client = ctx->client;
-    if (!client || !gdi || !gdi->primary_buffer) return CHANNEL_RC_OK;
-
-    client->width = (int)gdi->width;
-    client->height = (int)gdi->height;
-    ctx->width = (int)gdi->width;
-    ctx->height = (int)gdi->height;
-
-    if (client->on_frame) {
-        client->on_frame(client->user,
-                         gdi->primary_buffer,
-                         (int)gdi->width,
-                         (int)gdi->height,
-                         (int)gdi->stride);
+        return ctx->gfx_base_update_surfaces(context);
     }
     return CHANNEL_RC_OK;
 }
@@ -667,18 +636,21 @@ static void krdp_channel_connected(void* ctx, const ChannelConnectedEventArgs* e
     } else if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
         CliprdrClientContext* cliprdr = (CliprdrClientContext*)e->pInterface;
         context->cliprdr = cliprdr;
-        // Set our side of the callbacks; the Client* ones are already populated
-        // by the channel implementation.
-        cliprdr->custom = context->client;
         cliprdr->MonitorReady = krdp_cliprdr_monitor_ready;
         cliprdr->ServerCapabilities = krdp_cliprdr_server_capabilities;
         cliprdr->ServerFormatList = krdp_cliprdr_server_format_list;
         cliprdr->ServerFormatListResponse = krdp_cliprdr_server_format_list_response;
         cliprdr->ServerFormatDataRequest = krdp_cliprdr_server_format_data_request;
         cliprdr->ServerFormatDataResponse = krdp_cliprdr_server_format_data_response;
-        // Mac -> remote files (remote -> Mac is not advertised, see the struct).
-        cliprdr->ServerFileContentsRequest = krdp_cliprdr_server_file_contents_request;
-        cliprdr->ServerFileContentsResponse = krdp_cliprdr_server_file_contents_response;
+        // FreeRDP's file-clipboard helper takes over `cliprdr->custom` and installs
+        // its own lock/unlock and file-contents handlers. Doing that by hand (as
+        // an earlier build did) leaves CB_LOCK_CLIPDATA unanswered and the server
+        // waiting, so a file paste never completes. Our client is handed in as
+        // the context and read back through `krdp_client_from_cliprdr`.
+        context->client->cliprdr_file = cliprdr_file_context_new(context->client);
+        if (context->client->cliprdr_file) {
+            cliprdr_file_context_init(context->client->cliprdr_file, cliprdr);
+        }
     } else if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0) {
         RdpgfxClientContext* gfx = (RdpgfxClientContext*)e->pInterface;
         context->gfx = gfx;
@@ -1066,6 +1038,14 @@ void krdp_client_destroy(krdp_client* client)
     free(client->clipboard_text);
     for (int i = 0; i < client->clipboard_file_count; i++) free(client->clipboard_files[i]);
     free(client->clipboard_files);
+    if (client->cliprdr_file) {
+        // The channel context lives on the rdpContext, not on the client.
+        krdp_context* kctx = client->instance ? krdp_ctx(client->instance->context) : NULL;
+        CliprdrClientContext* cliprdr = (kctx && kctx->cliprdr) ? kctx->cliprdr : NULL;
+        if (cliprdr) cliprdr_file_context_uninit(client->cliprdr_file, cliprdr);
+        cliprdr_file_context_free(client->cliprdr_file);
+        client->cliprdr_file = NULL;
+    }
     free(client);
 }
 

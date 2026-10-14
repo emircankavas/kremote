@@ -1,4 +1,4 @@
-## KRemote v1.6.2
+## KRemote v1.6.3
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -6,21 +6,30 @@ connection tree with folder credential inheritance and mRemoteNG
 
 ### Fixes
 
-**RDP plays smoothly instead of hitching.** The graphics pipeline delivers frames
-faster than any display can present them, and three things were turning that
-into stutter:
+**Every RDP frame was being delivered twice.** The graphics pipeline's own
+`gdi_OutputUpdate` already calls `EndPaint` after blitting each surface, and the
+frame was *also* being handed over from the pipeline's `UpdateSurfaces` override.
+So each frame was copied, converted and drawn two times per arrival. The override
+now only runs the pipeline's blit; frames leave through the single `EndPaint`
+path.
 
-- Every frame was converted and assigned to the layer on the main thread as it
-  arrived, so a burst of frames queued up and the picture would run behind and
-  then jump. Frames now coalesce: only the newest is drawn, so the view shows the
-  current desktop rather than a backlog.
-- CoreAnimation's implicit animation on `contents` faded between frames. That is
-  both wrong for a live desktop and extra main-thread work — the assignment is
-  now made without animation.
-- `layout()` fires on every relayout and each call sent a Display Control resize
-  to the server, which answers with a `ResetGraphics` that tears down and rebuilds
-  the graphics surfaces. Identical sizes are now ignored.
+**File paste into a session actually works now.** The previous hand-written file
+handling was wrong in ways a server notices immediately:
 
-All of v1.6.1's and v1.6.0's work is included: the crash fix, the app icon, file
-paste into a session, the one-time Keychain migration, and the graphics pipeline.
+- The file format was advertised under a bare numeric id. Windows only offers a
+  file paste when the format is named (`FileGroupDescriptorW`), so the format was
+  never recognised as files.
+- `CB_LOCK_CLIPDATA` / `CB_UNLOCK_CLIPDATA` were answered by nobody. The server
+  asks for a lock before it reads a file; with no reply it simply waits, which is
+  why a paste hung and then did nothing.
+
+Both are now delegated to FreeRDP's own file-clipboard helper
+(`cliprdr_file_context`), which is what the reference clients use: it takes the
+clipboard's file list as a URI list, owns the file handles, and answers the lock
+and file-contents messages itself. The capability set now carries the long
+format-name and file-clip flags that leave means the server offers a paste, and
+the file list is serialised with the flags the server actually negotiated.
+
+All of v1.6.2, v1.6.1 and v1.6.0 is included.
+
 
