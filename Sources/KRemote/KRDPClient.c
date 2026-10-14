@@ -673,11 +673,14 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     // Let the server resize us on demand (drives the Display Control channel).
     freerdp_settings_set_bool(s, FreeRDP_DesktopResize, TRUE);
     freerdp_settings_set_bool(s, FreeRDP_SupportDisplayControl, TRUE);
-    // Use the RDP8 graphics pipeline (progressive / RemoteFX / H.264 via
-    // OpenH264). Without it every frame arrives as a full bitmap over the legacy
-    // GDI path, which is the "frames trickling in" feel on a real desktop.
-    freerdp_settings_set_bool(s, FreeRDP_SupportGraphicsPipeline, TRUE);
-    freerdp_settings_set_bool(s, FreeRDP_GfxH264, TRUE);
+    // The RDP8 graphics pipeline is deliberately NOT advertised. Turning it on
+    // makes the server send frames through rdpgfx, which delivers them via a
+    // `SurfaceCommand` callback that has to blit into the GDI surface; without
+    // that implementation the session connects and shows nothing at all. The
+    // legacy GDI path below draws correctly, so it stays until SurfaceCommand is
+    // implemented (it is the prerequisite for progressive/RemoteFX/H.264).
+    freerdp_settings_set_bool(s, FreeRDP_SupportGraphicsPipeline, FALSE);
+    freerdp_settings_set_bool(s, FreeRDP_GfxH264, FALSE);
     freerdp_settings_set_bool(s, FreeRDP_IgnoreCertificate, client->ignore_certificate ? TRUE : FALSE);
     freerdp_settings_set_bool(s, FreeRDP_RedirectClipboard, client->redirect_clipboard ? TRUE : FALSE);
     freerdp_settings_set_bool(s, FreeRDP_RedirectDrives, client->redirect_drives ? TRUE : FALSE);

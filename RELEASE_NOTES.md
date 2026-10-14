@@ -1,4 +1,4 @@
-## KRemote v1.5.2
+## KRemote v1.5.3
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -20,9 +20,13 @@ reads SSH connection state, which an RDP session never updates, so it sat on
 "Idle" forever directly above the RDP pane's own "Connected" bar. The RDP branch
 now draws its own header and status bar and the outer one is skipped for it.
 
-**RDP desktops should feel less like slideshow playback.** The RDP8 graphics
-pipeline (progressive / RemoteFX, H.264 through the bundled OpenH264) is now
-enabled, instead of every frame arriving as a full legacy GDI bitmap.
+**RDP shows a picture again.** v1.5.2 enabled the RDP8 graphics pipeline to make
+frames smoother, but the session then connected and drew nothing at all: with
+the pipeline on, the server sends its output through the `rdpgfx` channel's
+`SurfaceCommand` callback, which has to blit into the drawing surface, and that
+handler does not exist yet. The pipeline is now left off, so frames travel the
+legacy GDI path that v1.5.0 and v1.5.1 used and the desktop is visible again.
+The speed work needs `SurfaceCommand` first, and will come on its own.
 
 ### Fixes
 
