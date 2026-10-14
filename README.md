@@ -56,6 +56,12 @@ interactive shell.
 
 - Transport: the **system `ssh` (OpenSSH) run on a PTY** (`forkpty`), not a
   Swift SSH library. Terminal: SwiftTerm's `TerminalView`.
+- The terminal runs with **Option as a normal modifier** (`optionAsMetaKey =
+  false`). SwiftTerm's default treats Option as a meta key and sends ESC + the
+  letter, which makes Option-based layouts unusable — on a Turkish or German
+  keyboard `@`, `~`, `|`, `[`, `]`, `{`, `}`, `\` are all Option/AltGr chords and
+  could not be typed at all. With the default off they compose normally, exactly
+  as in Terminal.app.
 - This is deliberate. OpenSSH already speaks every method a corporate server
   may demand — `~/.ssh/config`, key files, `ssh-agent`, GSSAPI/Kerberos SSO,
   keyboard-interactive, ProxyJump, ControlMaster. Pure-Swift stacks (NIOSSH /
@@ -87,6 +93,9 @@ view.
 - Credentials reuse the tree's username and Keychain password; the password is
   handed to FreeRDP in-process and never appears in argv, an environment variable
   or a temporary file.
+- The desktop is negotiated in **pixels** (the pane's backing size), so a Retina
+  pane gets a full-resolution desktop rather than a half-resolution one; clicks
+  and moves are mapped from view points onto the remote pixel grid.
 - The pane's status bar shows live state, target and resolved options, with
   **Reconnect** when a session drops.
 
@@ -140,9 +149,19 @@ publicly documented scheme; no mRemoteNG code or assets are used.
 
 - The tree is stored as JSON at
   `~/Library/Application Support/KRemote/tree.json`.
-- Passwords live in the **macOS Keychain** (one generic-password item per node).
-  They are never written to the JSON file — the node's `password` field is
+- Passwords live **encrypted in `secrets.enc`**, keyed by a **single** random
+  AES key held in the macOS Keychain — not one Keychain item per connection.
+  That matters: the legacy Keychain validates "Always Allow" against the
+  requesting binary's code signature, so a stored password's grant does not
+  survive an app update. With one item per node that meant **a dialog per
+  connection after every update** (the "10 prompts on each release" behaviour);
+  with one item, an update can prompt at most once. (The Data Protection
+  Keychain would avoid even that, but it needs a signing Team ID and a
+  `keychain-access-groups` entitlement, which a self-signed build does not have.)
+- Passwords are never written to the JSON file — the node's `password` field is
   deliberately excluded from `CodingKeys`, and a unit test asserts it stays out.
+- Passwords are loaded **lazily**, per node, when a connection is opened or
+  edited — never all at once at launch.
 - Per-node values are *directly set*; a blank field (or port `0`) means
   **inherit from the parent folder**, resolved by `EffectiveConnection`.
 

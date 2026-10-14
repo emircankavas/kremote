@@ -1,7 +1,7 @@
 import Foundation
 
-/// Where a password lives. Real app: Keychain (`KeychainSecretStore`).
-/// Tests: `InMemorySecretStore`.
+/// Where a password lives. Real app: an encrypted file keyed by a single Keychain
+/// item (`EncryptedSecretStore`). Tests: `InMemorySecretStore`.
 public protocol SecretStore: AnyObject {
     func secret(for id: UUID) throws -> String?
     func setSecret(_ secret: String, for id: UUID) throws

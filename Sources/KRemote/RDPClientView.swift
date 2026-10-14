@@ -108,8 +108,9 @@ struct RDPClientView: NSViewRepresentable {
             view.attach(client: client)
 
             // The connection needs the pane's real size before it starts, so the
-            // first frame is not letterboxed.
-            let size = view.bounds.size.width > 0 ? view.bounds.size : CGSize(width: 1024, height: 768)
+            // first frame is not letterboxed — and in *pixels*, not points, so a
+            // Retina pane gets a full-resolution desktop.
+            let size = view.bounds.width > 0 ? view.backingPixelSize : CGSize(width: 1280, height: 800)
             client.connect(
                 host: host,
                 port: port,
@@ -144,15 +145,48 @@ final class RDPHostView: NSView {
     /// Previous modifier state, so `flagsChanged` can tell a press from a release
     /// (AppKit sends one event for both).
     private var lastModifierFlags: NSEvent.ModifierFlags = []
+    /// Size of the remote desktop in its own pixels, as last reported by a frame.
+    /// Needed to map a click in this view (points) onto the remote surface.
+    private var desktopSize = CGSize.zero
 
     func attach(client: RDPClient) {
         self.client = client
+        wantsLayer = true
+        // The remote image is in remote pixels, the layer is in points; let the
+        // layer scale it so a Retina desktop is shown at full detail.
+        layer?.contentsGravity = .resize
+    }
+
+    /// This view's size in device pixels — what the remote desktop should be.
+    ///
+    /// Requesting the desktop in *points* is what made it look low-resolution:
+    /// on a Retina display the screen has twice the pixels, so a point-sized
+    /// desktop is half the available detail.
+    var backingPixelSize: CGSize {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        return CGSize(width: size.width.rounded(), height: size.height.rounded())
+    }
+
+    /// Maps a point in this view onto the remote desktop's pixel grid.
+    ///
+    /// Without this, a click on a Retina Mac is reported at half its real
+    /// position (and every other scale — fit-to-panel, fullscreen — is off too).
+    private func remotePoint(_ local: CGPoint) -> CGPoint {
+        guard desktopSize.width > 0, desktopSize.height > 0, bounds.width > 0, bounds.height > 0 else {
+            return local
+        }
+        return CGPoint(
+            x: local.x * desktopSize.width / bounds.width,
+            y: local.y * desktopSize.height / bounds.height
+        )
     }
 
     /// Blits a decoded frame. `data` is already an owned copy taken on FreeRDP's
     /// thread, so it is safe to hand to CoreGraphics here.
     func presentFrame(_ data: Data, width: Int, height: Int, stride: Int) {
         guard width > 0, height > 0, stride > 0, data.count >= stride * height else { return }
+        desktopSize = CGSize(width: width, height: height)
         // CGDataProvider retains the CFData we hand it, so the buffer outlives
         // the CGImage without an extra copy.
         let provider = CGDataProvider(data: data as CFData)
@@ -183,6 +217,20 @@ final class RDPHostView: NSView {
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { true }
 
+    /// Without a tracking area AppKit never delivers `mouseMoved`, so the remote
+    /// cursor would only update on a click or drag and every click would land at
+    /// a stale position.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         // Without this the view never receives key events (SwiftUI often does not
@@ -195,7 +243,7 @@ final class RDPHostView: NSView {
 
     override func layout() {
         super.layout()
-        client?.resize(to: bounds.size)
+        client?.resize(to: backingPixelSize)
     }
 
     // MARK: - Input
@@ -207,7 +255,7 @@ final class RDPHostView: NSView {
     override func otherMouseDown(with event: NSEvent) { forwardMouse(event) }
     override func otherMouseUp(with event: NSEvent) { forwardMouse(event) }
     override func mouseMoved(with event: NSEvent) {
-        client?.sendMouseMove(at: convert(event.locationInWindow, from: nil))
+        client?.sendMouseMove(at: remotePoint(convert(event.locationInWindow, from: nil)))
     }
     override func mouseDragged(with event: NSEvent) { forwardMouse(event) }
     override func rightMouseDragged(with event: NSEvent) { forwardMouse(event) }
@@ -241,7 +289,7 @@ final class RDPHostView: NSView {
     }
 
     private func forwardMouse(_ event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
+        let point = remotePoint(convert(event.locationInWindow, from: nil))
         client?.sendMouse(at: point, button: button(for: event), isDown: isDown(event))
     }
     private func button(for event: NSEvent) -> RDPClient.MouseButton {

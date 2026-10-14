@@ -54,7 +54,7 @@ final class AppModel {
 
     init(store: NodeStore = .defaultStore(), secrets: SecretStore? = nil) {
         self.store = store
-        self.secrets = secrets ?? KeychainSecretStore()
+        self.secrets = secrets ?? EncryptedSecretStore.defaultStore()
         load()
     }
 
@@ -70,12 +70,14 @@ final class AppModel {
                 roots = ConnectionNode.sample
                 try store.save(roots)
             }
-            hydratePasswords()
         } catch {
             lastError = "Could not load connections: \(error)"
             roots = ConnectionNode.sample
-            hydratePasswords()
         }
+        // Passwords are NOT read here. Doing that at launch pulled every stored
+        // secret out of the Keychain at once — one dialog per connection — which
+        // is exactly the "10 prompts on launch" behaviour. They load lazily,
+        // per node, the first time one is actually needed.
     }
 
     /// Saves the tree. Called by every mutation; cheap at this scale.
@@ -95,12 +97,27 @@ final class AppModel {
         }
     }
 
-    /// Pulls each node's password out of the secret store into the in-memory node.
+    /// Pulls a node's password out of the secret store into the in-memory node.
     /// Folders are included: a folder may hold a default password that its
     /// connections inherit.
-    private func hydratePasswords() {
-        for node in ConnectionNode.allNodes(in: roots) {
-            node.password = (try? secrets.secret(for: node.id)) ?? ""
+    ///
+    /// Called on demand (before a node is opened or edited), not for the whole
+    /// tree at launch, so opening the app does not read every secret at once.
+    private func hydratePassword(for node: ConnectionNode) {
+        guard node.password.isEmpty else { return }
+        node.password = (try? secrets.secret(for: node.id)) ?? ""
+    }
+
+    /// Resolves the credentials a connection needs, reading the node's own
+    /// password and every ancestor folder's from the store (inheritance can pull
+    /// a folder's default password).
+    func hydrateCredentials(for id: ConnectionNode.ID) {
+        guard let node = find(id) else { return }
+        hydratePassword(for: node)
+        var current = ConnectionNode.parentID(of: id, in: roots)
+        while let parentID = current, let parent = find(parentID) {
+            hydratePassword(for: parent)
+            current = ConnectionNode.parentID(of: parentID, in: roots)
         }
     }
 
@@ -189,7 +206,10 @@ final class AppModel {
     // MARK: - Editing
 
     func draft(for id: ConnectionNode.ID) -> ConnectionDraft? {
-        find(id).map(ConnectionDraft.init(from:))
+        // The editor shows the stored password, so load it (and inherited
+        // folder defaults) for this node on demand.
+        hydrateCredentials(for: id)
+        return find(id).map(ConnectionDraft.init(from:))
     }
 
     /// Applies an edited draft back to the tree and the Keychain.
@@ -373,6 +393,9 @@ final class AppModel {
     /// connection already has a tab, that tab is focused instead.
     func open(_ node: ConnectionNode, newTab: Bool = false) {
         guard !node.isFolder else { return }
+        // Read this connection's credentials (and its folders') from the store
+        // now, rather than at launch.
+        hydrateCredentials(for: node.id)
         if !newTab, let existing = sessions.first(where: { $0.nodeID == node.id }) {
             activeSessionID = existing.id
             focusTiledSession(existing.id)

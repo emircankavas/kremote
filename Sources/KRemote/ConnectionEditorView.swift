@@ -28,6 +28,9 @@ struct ConnectionEditorView: View {
     /// Used only to label inheritance placeholders.
     private var inherited: EffectiveConnection? {
         guard let parentID = ConnectionNode.parentID(of: nodeID, in: model.roots) else { return nil }
+        // Folders' stored passwords are lazy too, so resolve them before showing
+        // inherited values as placeholders.
+        model.hydrateCredentials(for: parentID)
         return model.effective(parentID)
     }
 
@@ -249,6 +252,9 @@ struct ConnectionEditorView: View {
 
     private func loadDraft() {
         guard !loaded, let node else { return }
+        // The stored password is loaded lazily, so pull this node's (and its
+        // folders') out of the store now that the editor is opening.
+        model.hydrateCredentials(for: nodeID)
         draft = ConnectionDraft(from: node)
         loaded = true
     }

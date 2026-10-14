@@ -44,6 +44,11 @@ struct TerminalSessionView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> TerminalView {
         let view = TerminalView(frame: .zero)
+        // Option must produce the composed character, not a meta prefix. With
+        // SwiftTerm's default (true) an Option chord sends ESC + the letter, so
+        // Option-based layouts (AltGr: @, ~, |, [ ] { } \ on a Turkish/German
+        // keyboard) can never reach the remote shell.
+        view.optionAsMetaKey = false
         view.terminalDelegate = context.coordinator
         context.coordinator.attach(view: view, onStateChange: onStateChange, onTitleChange: onTitleChange)
         context.coordinator.installFocusMonitor(view: view, onFocus: onFocus)
