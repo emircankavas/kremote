@@ -269,7 +269,26 @@ final class RDPHostView: NSView {
         // The remote image is in remote pixels, the layer is in points; let the
         // layer scale it so a Retina desktop is shown at full detail.
         layer?.contentsGravity = .resize
+        // Frames arrive continuously; CoreAnimation's implicit fade between
+        // `contents` assignments makes that a smear and piles work on the main
+        // thread. The eye does not want an animation here — it wants the newest
+        // frame, immediately.
+        layer?.actions = [
+            "contents": NSNull(),
+            "onOrderIn": NSNull(),
+            "onOrderOut": NSNull(),
+            "bounds": NSNull(),
+            "position": NSNull(),
+        ]
     }
+
+    /// One decoded frame, waiting to be turned into a CGImage. Frames arriving
+    /// while one is pending replace it: an EGFX desktop can deliver far more than
+    /// Swift can present, and showing only the newest keeps latency bounded
+    /// instead of building a backlog that reads as the picture freezing and then
+    /// jumping.
+    private var pendingFrame: (data: Data, width: Int, height: Int, stride: Int)?
+    private var frameFlushScheduled = false
 
     /// This view's size in device pixels — what the remote desktop should be.
     ///
@@ -298,8 +317,23 @@ final class RDPHostView: NSView {
 
     /// Blits a decoded frame. `data` is already an owned copy taken on FreeRDP's
     /// thread, so it is safe to hand to CoreGraphics here.
+    ///
+    /// Only the most recent frame is kept: converting and presenting happens on
+    /// the next runloop pass, and by then three more may have arrived. Coalescing
+    /// here is what keeps a busy desktop smooth rather than stop-start.
     func presentFrame(_ data: Data, width: Int, height: Int, stride: Int) {
         guard width > 0, height > 0, stride > 0, data.count >= stride * height else { return }
+        pendingFrame = (data, width, height, stride)
+        guard !frameFlushScheduled else { return }
+        frameFlushScheduled = true
+        DispatchQueue.main.async { [weak self] in self?.flushFrame() }
+    }
+
+    private func flushFrame() {
+        frameFlushScheduled = false
+        guard let frame = pendingFrame else { return }
+        pendingFrame = nil
+        let (data, width, height, stride) = frame
         desktopSize = CGSize(width: width, height: height)
         // CGDataProvider retains the CFData we hand it, so the buffer outlives
         // the CGImage without an extra copy.
@@ -325,7 +359,11 @@ final class RDPHostView: NSView {
         ) else { return }
 
         wantsLayer = true
+        // Wrapped so the assignment is not animated (see `attach`).
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         layer?.contents = image
+        CATransaction.commit()
     }
 
     override var acceptsFirstResponder: Bool { true }

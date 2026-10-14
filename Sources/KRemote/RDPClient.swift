@@ -35,6 +35,9 @@ final class RDPClient {
 
     private let sink: RDPBridgeSink
     private var handle: OpaquePointer?
+    /// Last size handed to the server, so repeated `layout()` passes do not each
+    /// send a resize.
+    private var lastResizeSize: CGSize?
     /// Retained for the session's lifetime: the C side keeps only a raw pointer.
     private var callbacks: Unmanaged<RDPBridgeCallbacks>?
 
@@ -224,6 +227,12 @@ final class RDPClient {
 
     func resize(to size: CGSize) {
         guard let handle, size.width > 0, size.height > 0 else { return }
+        // `layout()` runs on every re-layout, and each call here sends a Display
+        // Control resize to the server, which answers with a ResetGraphics that
+        // tears down and rebuilds the graphics surfaces. Un-deduped that turns
+        // ordinary relayouts into a visible hitch.
+        guard size != lastResizeSize else { return }
+        lastResizeSize = size
         krdp_client_resize(handle, Int32(size.width), Int32(size.height))
     }
 
