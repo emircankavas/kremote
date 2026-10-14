@@ -1,4 +1,4 @@
-## KRemote v1.5.3
+## KRemote v1.6.0
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -6,34 +6,38 @@ connection tree with folder credential inheritance and mRemoteNG
 
 ### What's new
 
-**RDP clipboard now works, both directions.** Copy on the Mac and paste inside
-the session, or copy in the session and paste on the Mac. The clipboard channel
-was never being created: FreeRDP rebuilds its channel manager *after*
-pre-connect and populates it through an `instance->LoadChannels` callback that
-this build left unset, so no virtual channel — clipboard or display — ever went
-live. That callback is now installed, and the clipboard and Display Control
-channels are requested by name before the rebuild. Text is converted between
-UTF-16LE (what RDP speaks) and UTF-8 by hand, so non-ASCII and emoji survive.
+**An app icon.** KRemote finally has one — the blue-to-purple gradient with the
+"K" running into a terminal window.
 
-**The RDP pane no longer shows two stacked status bars.** The outer pane bar
-reads SSH connection state, which an RDP session never updates, so it sat on
-"Idle" forever directly above the RDP pane's own "Connected" bar. The RDP branch
-now draws its own header and status bar and the outer one is skipped for it.
+**Copy files from the Mac into a session.** With text working, files now work in
+the direction that gets used most: copy a file in Finder while an RDP session is
+focused, then paste it on the remote desktop. The clipboard channel advertises
+the file format (`CF_HDROP`) and streams the bytes the server asks for, in
+chunks. Several files at once work. Copying files *out* of a session is not
+supported yet — FreeRDP routes that through a FUSE mount that macOS builds do
+not have, and nothing is claimed rather than promising a paste that would do
+nothing.
 
-**RDP shows a picture again.** v1.5.2 enabled the RDP8 graphics pipeline to make
-frames smoother, but the session then connected and drew nothing at all: with
-the pipeline on, the server sends its output through the `rdpgfx` channel's
-`SurfaceCommand` callback, which has to blit into the drawing surface, and that
-handler does not exist yet. The pipeline is now left off, so frames travel the
-legacy GDI path that v1.5.0 and v1.5.1 used and the desktop is visible again.
-The speed work needs `SurfaceCommand` first, and will come on its own.
+**Passwords saved before v1.5.0 are carried over automatically.** The old
+per-connection Keychain items are read once, moved into the encrypted store and
+deleted. After that the app keeps a single Keychain entry, so updating the app no
+longer re-prompts for every connection.
+
+**RDP frames come through the RDP8 graphics pipeline again — this time with the
+drawing hook it needs.** The pipeline (progressive / RemoteFX, H.264 through the
+bundled OpenH264) is what makes a real desktop feel smooth rather than a
+slideshow, and it was switched on in 1.5.2 without any way to receive the frames:
+rdpgfx does not call the plain GDI `EndPaint`, it hands finished surfaces to an
+`UpdateSurfaces` callback. That callback is now chained onto FreeRDP's own
+GFX→GDI translation, so surfaces are decoded and drawn first and the finished
+buffer is then handed to the app.
 
 ### Fixes
 
-- RDP: closing a tab while the sign-in sheet was open no longer blocks; the wait
-  is released before the session thread is joined.
-- RDP: a display-control channel requested under its wire name made post-connect
-  fail outright; the addin lookup name is used instead.
+- RDP: the GFX drawing hook takes care not to replace the pipeline's own
+  `UpdateSurfaces`; calling it first is what puts a picture on screen at all.
+- RDP: the clipboard and Display Control channels keep working from v1.5.2 (the
+  channel manager is loaded through `instance->LoadChannels`).
 
 ### Notes
 
@@ -41,3 +45,6 @@ The speed work needs `SurfaceCommand` first, and will come on its own.
   pkgconf, openssl, openh264, jansson, uriparser, jpeg-turbo) and XcodeGen; the
   FreeRDP libraries are built without ffmpeg and embedded in the app, so end
   users install nothing.
+- The pipeline can only be exercised against a server that offers it; the local
+  FreeRDP shadow server does not, so smoothness and file paste both want a real
+  Windows host to confirm.

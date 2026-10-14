@@ -78,6 +78,11 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
 /// empty clipboard. Safe to call at any time; a no-op before the channel is up.
 void krdp_client_set_clipboard(krdp_client* client, const char* utf8);
 
+/// Announces the local clipboard's files (absolute paths) to the server, so they
+/// can be pasted into the remote desktop. Replaces any previous list; pass NULL
+/// or count 0 to clear. Paths are copied. Remote -> Mac is not supported.
+void krdp_client_set_clipboard_files(krdp_client* client, const char* const* paths, int count);
+
 /// Answers an outstanding `krdp_credentials_cb`. Both strings are copied; pass
 /// NULL for the password to abort (returns the connection failure). Safe to call
 /// when no request is outstanding (it is then a no-op).

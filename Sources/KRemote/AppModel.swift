@@ -65,6 +65,7 @@ final class AppModel {
         self.store = store
         self.secrets = secrets ?? EncryptedSecretStore.defaultStore()
         load()
+        migrateLegacyKeychainIfNeeded()
     }
 
     // MARK: - Persistence
@@ -128,6 +129,49 @@ final class AppModel {
             hydratePassword(for: parent)
             current = ConnectionNode.parentID(of: parentID, in: roots)
         }
+    }
+
+    // MARK: - Legacy keychain migration
+
+    /// Moves passwords from the old per-node Keychain items into the encrypted
+    /// store, once per install.
+    ///
+    /// Before v1.5.0 every node had its own Keychain item under service
+    /// `com.emircankavas.kremote`; that scheme prompted once per connection after
+    /// every app update. Those items are still on disk, so this reads each node's
+    /// (and folder's) old item, writes it into `secrets.enc`, and deletes the old
+    /// one. It runs at most once: a completion marker is stored, and it also skips
+    /// any node the new store already covers.
+    ///
+    /// It is deliberately best-effort: a locked or denied Keychain must not stop
+    /// the app from launching, so failures leave the marker unset and simply retry
+    /// next time.
+    private func migrateLegacyKeychainIfNeeded() {
+        let defaultsKey = "legacyKeychainMigrated"
+        guard !UserDefaults.standard.bool(forKey: defaultsKey) else { return }
+        let legacy = LegacyKeychainSecretStore()
+        guard legacy.hasAnyStoredSecret() else {
+            // Nothing to move — mark done so a fresh install never probes again.
+            UserDefaults.standard.set(true, forKey: defaultsKey)
+            return
+        }
+
+        for node in ConnectionNode.allNodes(in: roots) {
+            if ((try? secrets.secret(for: node.id)) ?? nil) != nil { continue }
+            guard let secret = try? legacy.secret(for: node.id), !secret.isEmpty else {
+                continue
+            }
+            do {
+                try secrets.setSecret(secret, for: node.id)
+                try? legacy.removeSecret(for: node.id)
+            } catch {
+                // Leave the old item in place; the marker stays unset and this
+                // runs again next launch.
+                lastError = "Could not migrate a saved password: \(error)"
+                return
+            }
+        }
+        UserDefaults.standard.set(true, forKey: defaultsKey)
     }
 
     // MARK: - Selection

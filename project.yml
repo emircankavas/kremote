@@ -24,8 +24,8 @@ packages:
 
 settings:
   base:
-    MARKETING_VERSION: "1.5.3"
-    CURRENT_PROJECT_VERSION: "10"
+    MARKETING_VERSION: "1.6.0"
+    CURRENT_PROJECT_VERSION: "11"
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: minimal
     DEAD_CODE_STRIPPING: "YES"
@@ -42,6 +42,12 @@ targets:
     platform: macOS
     sources:
       - path: Sources/KRemote
+        excludes:
+          - "Resources/*.icns"
+      # The app icon is copied in as a plain resource (not an asset catalog, so
+      # XcodeGen needs no extra target settings) and named by CFBundleIconFile.
+      - path: Sources/KRemote/Resources/KRemote.icns
+        buildPhase: resources
     dependencies:
       - package: KRemoteCore
         product: KRemoteCore

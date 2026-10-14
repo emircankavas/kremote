@@ -162,6 +162,8 @@ final class RDPClipboardBridge {
     /// What we last pushed to the remote side, so polling does not re-announce
     /// our own echoes (which would ping-pong between the two ends).
     private var lastSentText: String?
+    /// File URLs last announced, on the same principle as `lastSentText`.
+    private var lastSentFiles: [String]?
     private var timer: Timer?
     private weak var client: RDPClient?
 
@@ -178,9 +180,7 @@ final class RDPClipboardBridge {
     func start() {
         guard let client else { return }
         // Announce whatever the user already had copied, so paste works right away.
-        let initial = NSPasteboard.general.string(forType: .string)
-        lastSentText = initial
-        if let initial, !initial.isEmpty { client.setLocalClipboardText(initial) }
+        announceCurrentPasteboard(client)
         // Cancels the eyes-closed situation where a poller dies with the view.
         timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
@@ -193,9 +193,43 @@ final class RDPClipboardBridge {
         client = nil
     }
 
+    /// Pushes the pasteboard to the server. Files win over text: when a file copy
+    /// happens Finder also puts a text representation on the pasteboard, and the
+    /// file is what the user meant.
+    private func announceCurrentPasteboard(_ client: RDPClient) {
+        let files = currentFilePaths()
+        lastSentFiles = files
+        lastSentText = NSPasteboard.general.string(forType: .string)
+        if !files.isEmpty {
+            client.setLocalClipboardFiles(files)
+        } else if let text = lastSentText, !text.isEmpty {
+            client.setLocalClipboardText(text)
+        }
+    }
+
+    /// File paths the pasteboard currently holds, if any.
+    private func currentFilePaths() -> [String] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true,
+        ]
+        let objects = NSPasteboard.general.readObjects(
+            forClasses: [NSURL.self], options: options
+        ) as? [URL]
+        return (objects ?? []).map(\.path)
+    }
+
     /// Pushes local clipboard changes to the server.
     private func poll() {
         guard let client, ownsPasteboard else { return }
+        let files = currentFilePaths()
+        if files != lastSentFiles {
+            lastSentFiles = files
+            if !files.isEmpty {
+                client.setLocalClipboardFiles(files)
+                return
+            }
+        }
+        if !files.isEmpty { return }   // files unchanged and still current
         let current = NSPasteboard.general.string(forType: .string) ?? ""
         guard current != lastSentText else { return }
         lastSentText = current

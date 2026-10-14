@@ -70,6 +70,21 @@ final class RDPClient {
         text.withCString { krdp_client_set_clipboard(handle, $0) }
     }
 
+    /// Announces the pasteboard's files to the server, so they can be pasted into
+    /// the remote desktop. The bridge copies each path.
+    func setLocalClipboardFiles(_ paths: [String]) {
+        guard let handle else { return }
+        if paths.isEmpty {
+            krdp_client_set_clipboard_files(handle, nil, 0)
+            return
+        }
+        // Owned C strings, only valid for this call (the bridge strdups them).
+        var owned: [UnsafeMutablePointer<CChar>?] = paths.map { strdup($0) }
+        defer { owned.forEach { free($0) } }
+        var pointers: [UnsafePointer<CChar>?] = owned.map { UnsafePointer($0) }
+        krdp_client_set_clipboard_files(handle, &pointers, Int32(paths.count))
+    }
+
     /// Answers an outstanding credential request. Safe to call at any time.
     func answerCredentials(_ answer: RDPCredentialAnswer) {
         guard let handle else { return }
