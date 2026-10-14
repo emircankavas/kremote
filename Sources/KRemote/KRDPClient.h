@@ -28,6 +28,13 @@ typedef void (*krdp_frame_cb)(void* user,
 /// State changes. `message` is a short human-readable reason (may be NULL).
 typedef void (*krdp_state_cb)(void* user, krdp_state state, const char* message);
 
+/// Asks the UI for credentials when the server demands them and none are stored
+/// (or the stored ones were rejected). Called on the session thread, which then
+/// blocks until `krdp_client_supply_credentials` or `krdp_client_cancel_credentials`
+/// is called, or the wait times out.
+/// `username` / `domain` are the values currently in use, for pre-filling.
+typedef void (*krdp_credentials_cb)(void* user, const char* username, const char* domain);
+
 typedef struct {
     const char* host;
     uint16_t port;
@@ -59,7 +66,19 @@ const char* krdp_freerdp_version(void);
 krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
                                 krdp_frame_cb on_frame,
                                 krdp_state_cb on_state,
+                                krdp_credentials_cb on_credentials,
                                 void* user);
+
+/// Answers an outstanding `krdp_credentials_cb`. Both strings are copied; pass
+/// NULL for the password to abort (returns the connection failure). Safe to call
+/// when no request is outstanding (it is then a no-op).
+void krdp_client_supply_credentials(krdp_client* client,
+                                    const char* username,
+                                    const char* domain,
+                                    const char* password);
+
+/// Aborts an outstanding `krdp_credentials_cb` (equivalent to supplying nothing).
+void krdp_client_cancel_credentials(krdp_client* client);
 
 /// Connects and runs the session on an internal thread. Returns false when the
 /// client could not be started (already running, or no instance).

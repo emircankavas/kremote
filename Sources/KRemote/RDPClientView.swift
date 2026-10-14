@@ -31,15 +31,19 @@ struct RDPClientView: NSViewRepresentable {
 
     let onStateChange: @MainActor (RDPClientState) -> Void
     var onFocus: @MainActor () -> Void = {}
+    /// Routes a credential request from the session to the UI.
+    var onCredentialsNeeded: @MainActor (String, String, @escaping (RDPCredentialAnswer) -> Void) -> Void = { _, _, _ in }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(
+        let coordinator = Coordinator(
             host: host,
             port: port,
             username: username,
             password: password,
             options: options
         )
+        coordinator.onCredentialsNeeded = onCredentialsNeeded
+        return coordinator
     }
 
     func makeNSView(context: Context) -> RDPHostView {
@@ -71,6 +75,8 @@ struct RDPClientView: NSViewRepresentable {
         private var client: RDPClient?
         private var focusMonitor: Any?
         private var onFocus: (@MainActor () -> Void)?
+        /// Set by the pane so credential requests reach the UI.
+        var onCredentialsNeeded: (@MainActor (String, String, @escaping (RDPCredentialAnswer) -> Void) -> Void)?
 
         init(host: String, port: Int, username: String, password: String, options: RDPOptions) {
             self.host = host
@@ -104,6 +110,7 @@ struct RDPClientView: NSViewRepresentable {
             let client = RDPClient(onStateChange: { state in
                 Task { @MainActor in onStateChange(state) }
             })
+            client.onCredentialsNeeded = onCredentialsNeeded
             self.client = client
             view.attach(client: client)
 

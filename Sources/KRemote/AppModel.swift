@@ -49,6 +49,15 @@ final class AppModel {
     /// Surfaced in the UI when load/save/Keychain fails; not fatal.
     var lastError: String?
 
+    /// Set when a live RDP session needs credentials the tree did not have (or
+    /// that the server rejected). The pane presents a sheet and answers through
+    /// `supplyRDPCredentials` / `cancelRDPCredentials`.
+    var pendingRDPLogin: RDPCredentialRequest?
+
+    /// How the answer reaches the RDP client whose session thread is waiting.
+    /// Set by the pane while it owns the live session; cleared once answered.
+    var rdpCredentialAnswer: ((RDPCredentialAnswer) -> Void)?
+
     private let store: NodeStore
     private let secrets: SecretStore
 
@@ -452,6 +461,26 @@ final class AppModel {
         if wasActiveTile, let active = activeSessionID, splitMode {
             focusedTile = PaneTiling.tile(of: active, in: tiles) ?? focusedTile
         }
+    }
+
+    /// Answers an outstanding RDP credential request. The C layer blocks the
+    /// session thread until this (or `cancelRDPCredentials`) is called.
+    func supplyRDPCredentials(username: String, domain: String, password: String) {
+        let resolvedUser = username.isEmpty ? (pendingRDPLogin?.username ?? "") : username
+        let resolvedDomain = domain.isEmpty ? (pendingRDPLogin?.domain ?? "") : domain
+        pendingRDPLogin = nil
+        rdpCredentialAnswer?(
+            .supply(username: resolvedUser, domain: resolvedDomain, password: password)
+        )
+        rdpCredentialAnswer = nil
+    }
+
+    /// Abandons the credential request; the session then fails with the server's
+    /// reason rather than hanging.
+    func cancelRDPCredentials() {
+        pendingRDPLogin = nil
+        rdpCredentialAnswer?(.cancel)
+        rdpCredentialAnswer = nil
     }
 
     var activeSession: Session? {

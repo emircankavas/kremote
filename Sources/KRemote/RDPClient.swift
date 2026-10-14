@@ -42,6 +42,36 @@ final class RDPClient {
         let sink = RDPBridgeSink()
         sink.onState = onStateChange
         self.sink = sink
+        // Route credential requests to whoever set `onCredentialsNeeded`, and let
+        // them answer by calling back into this client.
+        sink.onCredentials = { [weak self] username, domain in
+            guard let self else { return }
+            self.onCredentialsNeeded?(username, domain) { [weak self] answer in
+                self?.answerCredentials(answer)
+            }
+        }
+    }
+
+    /// Called on the main actor when the server demands credentials the tree did
+    /// not supply. The C session thread is blocked until the `answer` closure is
+    /// invoked (which routes straight back into `answerCredentials`).
+    var onCredentialsNeeded: (@MainActor (String, String, @escaping (RDPCredentialAnswer) -> Void) -> Void)?
+
+    /// Answers an outstanding credential request. Safe to call at any time.
+    func answerCredentials(_ answer: RDPCredentialAnswer) {
+        guard let handle else { return }
+        switch answer {
+        case .supply(let username, let domain, let password):
+            username.withCString { user in
+                domain.withCString { dom in
+                    password.withCString { pw in
+                        krdp_client_supply_credentials(handle, user, dom, pw)
+                    }
+                }
+            }
+        case .cancel:
+            krdp_client_cancel_credentials(handle)
+        }
     }
 
     func connect(
@@ -75,6 +105,11 @@ final class RDPClient {
             onState: { state, message in
                 let mapped = RDPClient.map(state: state, message: message)
                 Task { @MainActor in sink.deliverState(mapped) }
+            },
+            onCredentials: { username, domain in
+                // Runs on the session thread, which then blocks until answered;
+                // hand the request to the main actor and return immediately.
+                Task { @MainActor in sink.deliverCredentials(username: username, domain: domain) }
             }
         )
         let retained = Unmanaged.passRetained(callbacks)
@@ -118,6 +153,7 @@ final class RDPClient {
                             &descriptor,
                             rdpFrameCallback,
                             rdpStateCallback,
+                            rdpCredentialsCallback,
                             pointer
                         )
                     }
@@ -202,6 +238,9 @@ final class RDPClient {
 final class RDPBridgeSink {
     weak var view: RDPHostView?
     var onState: ((RDPClientState) -> Void)?
+    /// Set by `RDPClient`, which is the only thing that can route the answer back
+    /// into the blocked session thread.
+    var onCredentials: ((String, String) -> Void)?
 
     func deliverFrame(_ data: Data, width: Int, height: Int, stride: Int) {
         view?.presentFrame(data, width: width, height: height, stride: stride)
@@ -209,6 +248,10 @@ final class RDPBridgeSink {
 
     func deliverState(_ state: RDPClientState) {
         onState?(state)
+    }
+
+    func deliverCredentials(username: String, domain: String) {
+        onCredentials?(username, domain)
     }
 }
 
@@ -224,13 +267,16 @@ private func withOptionalCString<R>(_ value: String?, _ body: (UnsafePointer<CCh
 private final class RDPBridgeCallbacks: Sendable {
     let onFrame: @Sendable (UnsafePointer<UInt8>?, Int, Int, Int) -> Void
     let onState: @Sendable (krdp_state, String?) -> Void
+    let onCredentials: @Sendable (String, String) -> Void
 
     init(
         onFrame: @escaping @Sendable (UnsafePointer<UInt8>?, Int, Int, Int) -> Void,
-        onState: @escaping @Sendable (krdp_state, String?) -> Void
+        onState: @escaping @Sendable (krdp_state, String?) -> Void,
+        onCredentials: @escaping @Sendable (String, String) -> Void
     ) {
         self.onFrame = onFrame
         self.onState = onState
+        self.onCredentials = onCredentials
     }
 }
 
@@ -256,6 +302,19 @@ private func rdpStateCallback(
     guard let user else { return }
     let callbacks = Unmanaged<RDPBridgeCallbacks>.fromOpaque(user).takeUnretainedValue()
     callbacks.onState(state, message.map { String(cString: $0) })
+}
+
+private func rdpCredentialsCallback(
+    _ user: UnsafeMutableRawPointer?,
+    _ username: UnsafePointer<CChar>?,
+    _ domain: UnsafePointer<CChar>?
+) {
+    guard let user else { return }
+    let callbacks = Unmanaged<RDPBridgeCallbacks>.fromOpaque(user).takeUnretainedValue()
+    callbacks.onCredentials(
+        username.map { String(cString: $0) } ?? "",
+        domain.map { String(cString: $0) } ?? ""
+    )
 }
 
 private extension RDPClient.MouseButton {

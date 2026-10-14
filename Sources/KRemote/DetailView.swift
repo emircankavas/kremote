@@ -439,6 +439,25 @@ private struct RDPSessionContent: View {
         .background(.background)
         .contentShape(Rectangle())
         .onTapGesture(perform: onFocus)
+        .sheet(item: loginRequest) { request in
+            RDPLoginSheet(request: request) { username, domain, password in
+                model.supplyRDPCredentials(
+                    username: username,
+                    domain: domain,
+                    password: password
+                )
+            } onCancel: {
+                model.cancelRDPCredentials()
+            }
+        }
+    }
+
+    /// The sheet is only offered while this pane's session is the one asking.
+    private var loginRequest: Binding<RDPCredentialRequest?> {
+        Binding(
+            get: { model.pendingRDPLogin },
+            set: { if $0 == nil { model.pendingRDPLogin = nil } }
+        )
     }
 
     @ViewBuilder
@@ -459,7 +478,16 @@ private struct RDPSessionContent: View {
                         onClose()
                     }
                 },
-                onFocus: onFocus
+                onFocus: onFocus,
+                onCredentialsNeeded: { username, domain, answer in
+                    // The session thread is already blocked waiting for this; the
+                    // sheet answers through AppModel, which calls `answer`.
+                    model.rdpCredentialAnswer = answer
+                    model.pendingRDPLogin = RDPCredentialRequest(
+                        username: username.isEmpty ? (model.effective(nodeID)?.username ?? "") : username,
+                        domain: domain.isEmpty ? (model.effective(nodeID)?.rdp.domain ?? "") : domain
+                    )
+                }
             )
             .id(session.generation)
         } else {

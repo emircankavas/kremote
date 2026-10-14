@@ -73,7 +73,15 @@ struct krdp_client {
 
     krdp_frame_cb on_frame;
     krdp_state_cb on_state;
+    krdp_credentials_cb on_credentials;
     void* user;
+
+    // Credential/authentication flow: the session thread asks, then waits.
+    HANDLE credentials_event;
+    char* pending_username;
+    char* pending_domain;
+    char* pending_password;
+    bool credentials_aborted;
 
     freerdp* instance;
     HANDLE thread;
@@ -172,6 +180,77 @@ static BOOL krdp_post_connect(freerdp* instance)
     return TRUE;
 }
 
+// MARK: - Authentication
+
+/// Called by FreeRDP when the credentials it has are missing or were rejected.
+/// It runs on the session thread, so it asks the UI (via the callback) and then
+/// blocks here until the answer arrives — the same shape as any client that
+/// pops a login sheet.
+static BOOL krdp_authenticate_ex(freerdp* instance, char** username, char** password,
+                                 char** domain, rdp_auth_reason reason)
+{
+    krdp_context* ctx = krdp_ctx(instance->context);
+    krdp_client* client = ctx->client;
+    if (!client || !client->on_credentials) return FALSE;
+
+    // Gateway authentication is not supported; there are no stored gateway
+    // credentials to offer, so let it fail rather than prompt misleadingly.
+    if (reason == GW_AUTH_HTTP || reason == GW_AUTH_RDG || reason == GW_AUTH_RPC) return FALSE;
+
+    ResetEvent(client->credentials_event);
+    client->credentials_aborted = false;
+    client->on_credentials(client->user,
+                           *username ? *username : "",
+                           *domain ? *domain : "");
+
+    // Wait for the UI. Ten minutes is generous for a human and still bounded.
+    if (WaitForSingleObject(client->credentials_event, 10 * 60 * 1000) != WAIT_OBJECT_0) {
+        return FALSE;
+    }
+    if (client->credentials_aborted || !client->pending_password) return FALSE;
+
+    free(*username);
+    free(*domain);
+    free(*password);
+    *username = krdp_strdup(client->pending_username);
+    *domain = krdp_strdup(client->pending_domain);
+    *password = krdp_strdup(client->pending_password);
+
+    free(client->pending_username);
+    free(client->pending_domain);
+    if (client->pending_password) {
+        memset(client->pending_password, 0, strlen(client->pending_password));
+    }
+    free(client->pending_password);
+    client->pending_username = client->pending_domain = client->pending_password = NULL;
+
+    return TRUE;
+}
+
+void krdp_client_supply_credentials(krdp_client* client,
+                                    const char* username,
+                                    const char* domain,
+                                    const char* password)
+{
+    if (!client || !client->credentials_event) return;
+    free(client->pending_username);
+    free(client->pending_domain);
+    if (client->pending_password) memset(client->pending_password, 0, strlen(client->pending_password));
+    free(client->pending_password);
+    client->pending_username = krdp_strdup(username);
+    client->pending_domain = krdp_strdup(domain);
+    client->pending_password = krdp_strdup(password);
+    client->credentials_aborted = false;
+    SetEvent(client->credentials_event);
+}
+
+void krdp_client_cancel_credentials(krdp_client* client)
+{
+    if (!client || !client->credentials_event) return;
+    client->credentials_aborted = true;
+    SetEvent(client->credentials_event);
+}
+
 static void krdp_post_disconnect(freerdp* instance)
 {
     rdpContext* context = instance->context;
@@ -226,6 +305,7 @@ const char* krdp_freerdp_version(void) { return FREERDP_VERSION_FULL; }
 krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
                                 krdp_frame_cb on_frame,
                                 krdp_state_cb on_state,
+                                krdp_credentials_cb on_credentials,
                                 void* user)
 {
     if (!descriptor || !descriptor->host) return NULL;
@@ -260,6 +340,7 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     client->redirect_keys = descriptor->redirect_keys;
     client->on_frame = on_frame;
     client->on_state = on_state;
+    client->on_credentials = on_credentials;
     client->user = user;
 
     client->instance = freerdp_new();
@@ -271,6 +352,11 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     client->instance->PreConnect = krdp_pre_connect;
     client->instance->PostConnect = krdp_post_connect;
     client->instance->PostDisconnect = krdp_post_disconnect;
+    // Ask for credentials instead of failing silently when none are stored or the
+    // stored ones are rejected; the UI answers through krdp_client_supply_credentials.
+    client->instance->AuthenticateEx = krdp_authenticate_ex;
+    client->credentials_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!client->credentials_event) { krdp_client_destroy(client); return NULL; }
 
     if (!freerdp_context_new(client->instance)) {
         krdp_client_destroy(client);
@@ -339,6 +425,12 @@ void krdp_client_stop(krdp_client* client)
         // Was not running; still make sure resources are released below.
     }
     if (client->stop_event) SetEvent(client->stop_event);
+    // If the session thread is blocked in the credential callback, release it
+    // first — otherwise the join below would wait out the credential timeout.
+    if (client->credentials_event) {
+        client->credentials_aborted = true;
+        SetEvent(client->credentials_event);
+    }
     if (client->thread) {
         WaitForSingleObject(client->thread, INFINITE);
         CloseHandle(client->thread);
@@ -347,6 +439,10 @@ void krdp_client_stop(krdp_client* client)
     if (client->stop_event) {
         CloseHandle(client->stop_event);
         client->stop_event = NULL;
+    }
+    if (client->credentials_event) {
+        CloseHandle(client->credentials_event);
+        client->credentials_event = NULL;
     }
 }
 
