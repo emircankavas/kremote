@@ -99,8 +99,16 @@ private struct TerminalArea: View {
 
             ZStack(alignment: .topLeading) {
                 // Every session stays mounted for its whole life; only the ones in
-                // a pane are placed in a cell and shown. The rest are parked
-                // off-screen at 1x1 so their ssh process is untouched.
+                // a pane are placed in a cell and shown.
+                //
+                // Hidden sessions are parked *at their real pane size*, off to the
+                // right of the visible cells. They must NOT be shrunk to 1x1:
+                // SwiftTerm clamps a terminal to MINIMUM_COLS = 2 / MINIMUM_ROWS = 1,
+                // so a hidden pane becomes a 2-column terminal. Any output that
+                // arrives while it is hidden (a prompt redraw, a background job)
+                // gets wrapped at 2 columns and survives into the visible buffer,
+                // leaving the tail of the last line mangled. Parked views keep
+                // their size instead, so resizing never touches the emulator.
                 ForEach(model.sessions) { session in
                     SessionContent(
                         session: session,
@@ -108,11 +116,16 @@ private struct TerminalArea: View {
                         showPaneChrome: model.splitMode,
                         onFocus: { model.focus(session.id) }
                     )
-                    .frame(
-                        width: visibleWidth(for: session, cellWidth: cellW),
-                        height: visibleHeight(for: session, cellHeight: cellH)
+                    .frame(width: cellW, height: cellH)
+                    .offset(
+                        offset(
+                            for: session,
+                            cellWidth: cellW,
+                            cellHeight: cellH,
+                            columns: columns,
+                            gridWidth: cellW * CGFloat(columns) + gap * CGFloat(columns - 1)
+                        )
                     )
-                    .offset(offset(for: session, cellWidth: cellW, cellHeight: cellH, columns: columns))
                     .opacity(isVisible(session) ? 1 : 0)
                     .allowsHitTesting(isVisible(session))
                 }
@@ -144,17 +157,18 @@ private struct TerminalArea: View {
         visibleTileIndex(of: session) != nil
     }
 
-    private func visibleWidth(for session: Session, cellWidth: CGFloat) -> CGFloat {
-        isVisible(session) ? cellWidth : 1
-    }
-
-    private func visibleHeight(for session: Session, cellHeight: CGFloat) -> CGFloat {
-        isVisible(session) ? cellHeight : 1
-    }
-
-    private func offset(for session: Session, cellWidth: CGFloat, cellHeight: CGFloat, columns: Int) -> CGSize {
+    /// Placement for every session. Hidden ones are parked to the right of the
+    /// whole grid — far enough that they can never overlap a visible cell — at
+    /// full pane size, so their terminal geometry is untouched.
+    private func offset(
+        for session: Session,
+        cellWidth: CGFloat,
+        cellHeight: CGFloat,
+        columns: Int,
+        gridWidth: CGFloat
+    ) -> CGSize {
         guard let index = visibleTileIndex(of: session) else {
-            return CGSize(width: -10_000, height: -10_000) // parked off-screen, still alive
+            return CGSize(width: gridWidth + 16, height: 0)
         }
         return cellOffset(index, cellWidth: cellWidth, cellHeight: cellHeight, columns: columns)
     }
