@@ -129,9 +129,10 @@ struct TerminalSessionView: NSViewRepresentable {
             self.onTitleChange = onTitleChange
 
             let session = SSHPtySession(
-                onOutput: { [weak view] data in
+                onOutput: { [weak self] data in
+                    let bytes = [UInt8](data)
                     Task { @MainActor in
-                        view?.feed(byteArray: ArraySlice([UInt8](data)))
+                        self?.feed(bytes)
                     }
                 },
                 onStateChange: { state in
@@ -158,6 +159,13 @@ struct TerminalSessionView: NSViewRepresentable {
             }
 
             session.start(command: command, password: password, columns: columns, rows: rows)
+        }
+
+        /// Feeds PTY bytes to the terminal. Runs on the main actor: the
+        /// session's output callback is `@Sendable` and must not touch the view
+        /// itself, so it hands the bytes over and lets this hop do the rest.
+        private func feed(_ bytes: [UInt8]) {
+            view?.feed(byteArray: ArraySlice(bytes))
         }
 
         /// Writes raw text to the ssh process (used for the root command).
