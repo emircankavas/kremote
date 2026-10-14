@@ -12,6 +12,12 @@ import KRemoteCore
 /// The library is built from source without ffmpeg and with OpenH264 so every
 /// embedded dependency stays permissive (see `scripts/build-freerdp.sh`); the
 /// release bundle embeds it, so end users need nothing installed.
+///
+/// Concurrency: FreeRDP runs the session on its own thread and calls back from
+/// there. The callbacks therefore capture only `RDPBridgeSink` — a `@MainActor`
+/// class, and so `Sendable` — and hand it an owned `Data` copy of the frame.
+/// Nothing non-Sendable (this object, the `NSView`) crosses a thread boundary.
+@MainActor
 final class RDPClient {
 
     enum MouseButton {
@@ -27,13 +33,15 @@ final class RDPClient {
         return String(cString: cString)
     }
 
-    private let onStateChange: @Sendable (RDPClientState) -> Void
+    private let sink: RDPBridgeSink
     private var handle: OpaquePointer?
     /// Retained for the session's lifetime: the C side keeps only a raw pointer.
-    private var bridge: Unmanaged<RDPBridgeCallbacks>?
+    private var callbacks: Unmanaged<RDPBridgeCallbacks>?
 
-    init(onStateChange: @escaping @Sendable (RDPClientState) -> Void) {
-        self.onStateChange = onStateChange
+    init(onStateChange: @escaping @MainActor (RDPClientState) -> Void) {
+        let sink = RDPBridgeSink()
+        sink.onState = onStateChange
+        self.sink = sink
     }
 
     func connect(
@@ -46,22 +54,31 @@ final class RDPClient {
         size: CGSize
     ) {
         guard Self.isAvailable else {
-            onStateChange(.failed("This build has no FreeRDP client library."))
+            sink.deliverState(.failed("This build has no FreeRDP client library."))
             return
         }
+        sink.view = view
 
+        // The closures below run on FreeRDP's thread, so they capture only the
+        // sink (a Sendable @MainActor object) plus values they copy.
+        let sink = self.sink
         let callbacks = RDPBridgeCallbacks(
-            onFrame: { [weak view] bgra, width, height, stride in
-                guard let view else { return }
-                view.presentFrame(bgra: bgra, width: width, height: height, stride: stride)
+            onFrame: { bgra, width, height, stride in
+                guard let bgra, width > 0, height > 0, stride > 0 else { return }
+                // FreeRDP's paint buffer is only valid during the callback, so
+                // take an owned copy before hopping to the main actor.
+                let data = Data(bytes: bgra, count: stride * height)
+                Task { @MainActor in
+                    sink.deliverFrame(data, width: width, height: height, stride: stride)
+                }
             },
-            onState: { [weak self] state, message in
-                guard let self else { return }
-                self.onStateChange(Self.map(state: state, message: message))
+            onState: { state, message in
+                let mapped = RDPClient.map(state: state, message: message)
+                Task { @MainActor in sink.deliverState(mapped) }
             }
         )
         let retained = Unmanaged.passRetained(callbacks)
-        bridge = retained
+        self.callbacks = retained
 
         // A custom size is requested up front; smart size / fit / fullscreen let
         // the pane's size drive it and rely on Display Control afterwards.
@@ -109,8 +126,8 @@ final class RDPClient {
         }
         guard let handle = created else {
             retained.release()
-            bridge = nil
-            onStateChange(.failed("Could not create the RDP client."))
+            self.callbacks = nil
+            sink.deliverState(.failed("Could not create the RDP client."))
             return
         }
 
@@ -119,19 +136,20 @@ final class RDPClient {
             krdp_client_destroy(handle)
             self.handle = nil
             retained.release()
-            bridge = nil
-            onStateChange(.failed("Could not start the RDP session."))
+            self.callbacks = nil
+            sink.deliverState(.failed("Could not start the RDP session."))
         }
     }
 
     func disconnect() {
+        sink.view = nil
         if let handle {
             krdp_client_stop(handle)
             krdp_client_destroy(handle)
             self.handle = nil
         }
-        bridge?.release()
-        bridge = nil
+        callbacks?.release()
+        callbacks = nil
     }
 
     func resize(to size: CGSize) {
@@ -162,7 +180,9 @@ final class RDPClient {
         krdp_client_key(handle, scancode, extended, isDown)
     }
 
-    private static func map(state: krdp_state, message: String?) -> RDPClientState {
+    /// Pure mapping from the C enum; `nonisolated` and static so the callback
+    /// does not have to capture anything from an instance.
+    nonisolated static func map(state: krdp_state, message: String?) -> RDPClientState {
         switch state {
         case KRDP_STATE_CONNECTING: return .connecting
         case KRDP_STATE_CONNECTED: return .connected
@@ -173,15 +193,35 @@ final class RDPClient {
     }
 }
 
+/// Main-actor delivery target for frames and state.
+///
+/// A `@MainActor` class is `Sendable`, which is what lets FreeRDP's session
+/// thread hold a reference to it and hop back to the main actor. Everything the
+/// C callbacks touch lives here rather than on `RDPClient`.
+@MainActor
+final class RDPBridgeSink {
+    weak var view: RDPHostView?
+    var onState: ((RDPClientState) -> Void)?
+
+    func deliverFrame(_ data: Data, width: Int, height: Int, stride: Int) {
+        view?.presentFrame(data, width: width, height: height, stride: stride)
+    }
+
+    func deliverState(_ state: RDPClientState) {
+        onState?(state)
+    }
+}
+
 /// Runs `body` with a C string for `value`, or with nil when `value` is nil/empty.
 private func withOptionalCString<R>(_ value: String?, _ body: (UnsafePointer<CChar>?) -> R) -> R {
     guard let value, !value.isEmpty else { return body(nil) }
     return value.withCString(body)
 }
 
-/// Holds the Swift closures the C bridge calls back into. Retained via
-/// `Unmanaged` for exactly as long as the C handle lives.
-private final class RDPBridgeCallbacks {
+/// Holds the closures the C bridge calls back into. Retained via `Unmanaged` for
+/// exactly as long as the C handle lives; both closures are `@Sendable` and
+/// capture only Sendable state.
+private final class RDPBridgeCallbacks: Sendable {
     let onFrame: @Sendable (UnsafePointer<UInt8>?, Int, Int, Int) -> Void
     let onState: @Sendable (krdp_state, String?) -> Void
 

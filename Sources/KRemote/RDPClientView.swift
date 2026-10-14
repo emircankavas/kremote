@@ -136,6 +136,9 @@ struct RDPClientView: NSViewRepresentable {
 ///
 /// Mouse and keyboard handling live here rather than in SwiftUI: FreeRDP needs
 /// raw scancodes and button masks, and the remote cursor is hardware-painted.
+/// Every method runs on the main actor (AppKit and the sink both call here on
+/// the main thread).
+@MainActor
 final class RDPHostView: NSView {
     private var client: RDPClient?
     /// Previous modifier state, so `flagsChanged` can tell a press from a release
@@ -146,30 +149,14 @@ final class RDPHostView: NSView {
         self.client = client
     }
 
-    /// Blits a decoded frame. Called on FreeRDP's session thread, so it hops to
-    /// the main actor before touching the layer; the C buffer is only valid for
-    /// the duration of the call, hence the copy into a CGImage here.
-    func presentFrame(bgra: UnsafePointer<UInt8>?, width: Int, height: Int, stride: Int) {
-        guard let bgra, width > 0, height > 0, stride > 0 else { return }
-        // Copy out of FreeRDP's paint buffer before leaving this call.
-        let byteCount = stride * height
-        let copy = UnsafeMutableRawPointer.allocate(byteCount: byteCount, alignment: 16)
-        copy.copyMemory(from: bgra, byteCount: byteCount)
-        Task { @MainActor [weak self] in
-            guard let self else { copy.deallocate(); return }
-            self.blit(copy: copy, width: width, height: height, stride: stride)
-        }
-    }
-
-    @MainActor
-    private func blit(copy: UnsafeMutableRawPointer, width: Int, height: Int, stride: Int) {
-        defer { copy.deallocate() }
-        guard let provider = CGDataProvider(
-            dataInfo: nil,
-            data: copy,
-            size: stride * height,
-            releaseData: { _, _, _ in }
-        ) else { return }
+    /// Blits a decoded frame. `data` is already an owned copy taken on FreeRDP's
+    /// thread, so it is safe to hand to CoreGraphics here.
+    func presentFrame(_ data: Data, width: Int, height: Int, stride: Int) {
+        guard width > 0, height > 0, stride > 0, data.count >= stride * height else { return }
+        // CGDataProvider retains the CFData we hand it, so the buffer outlives
+        // the CGImage without an extra copy.
+        let provider = CGDataProvider(data: data as CFData)
+        guard let provider else { return }
 
         // FreeRDP's PIXEL_FORMAT_BGRA32 is little-endian BGRA, which CoreGraphics
         // spells as 32-bit little-endian with a skip-first (bgra) layout.

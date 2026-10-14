@@ -414,8 +414,10 @@ private struct RDPSessionContent: View {
     @Environment(AppModel.self) private var model
     let nodeID: ConnectionNode.ID
     let session: Session
-    let onFocus: () -> Void
-    let onClose: () -> Void
+    /// `@MainActor` matches `RDPClientView`'s callback types; SwiftUI views are
+    /// main-actor isolated, so the literals at the call site satisfy this.
+    let onFocus: @MainActor () -> Void
+    let onClose: @MainActor () -> Void
 
     @State private var state: RDPClientState = .idle
 
