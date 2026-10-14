@@ -23,7 +23,8 @@ permissions:
 jobs:
   release:
     name: Build & Release (macOS)
-    runs-on: macos-15
+    # Self-hosted: the Mac mini (no macOS-runner minutes on a private repo).
+    runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -43,10 +44,23 @@ jobs:
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Install XcodeGen
-        run: brew install xcodegen
+        run: |
+          set -o pipefail
+          export PATH="$HOME/hermes-build/bin:$PATH"
+          xcodegen --version || {
+            mkdir -p "$HOME/hermes-build/bin"
+            curl -fsSL -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip
+            rm -rf /tmp/xcodegen_dl && mkdir -p /tmp/xcodegen_dl && (cd /tmp/xcodegen_dl && unzip -q /tmp/xcodegen.zip)
+            find /tmp/xcodegen_dl -maxdepth 4 -name xcodegen -type f -exec cp {} "$HOME/hermes-build/bin/xcodegen" \;
+            chmod +x "$HOME/hermes-build/bin/xcodegen"
+            xcodegen --version
+          }
 
       - name: Generate Xcode project
-        run: xcodegen generate
+        run: |
+          set -o pipefail
+          export PATH="$HOME/hermes-build/bin:$PATH"
+          xcodegen generate
 
       - name: Build (Release)
         run: |
@@ -55,10 +69,12 @@ jobs:
             -project KRemote.xcodeproj \
             -scheme KRemote \
             -configuration Release \
-            -destination 'platform=macOS' \
+            -destination 'platform=macOS,arch=arm64' \
             -derivedDataPath build \
             -skipPackagePluginValidation \
             -skipMacroValidation \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO \
             build
 

@@ -14,7 +14,9 @@ concurrency:
 jobs:
   build:
     name: Build (macOS)
-    runs-on: macos-15
+    # Self-hosted: the Mac mini, so a private repo pays no macOS-runner minutes
+    # (GitHub bills 10x for hosted macOS). See docs/SELF_HOSTED_RUNNER.md.
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v4
 
@@ -25,22 +27,42 @@ jobs:
           xcodebuild -version
 
       - name: Install XcodeGen
-        run: brew install xcodegen
+        # Self-hosted runner: XcodeGen is fetched once into ~/hermes-build/bin
+        # by the runner bootstrap (no Homebrew on this Mac).
+        run: |
+          set -o pipefail
+          export PATH="$HOME/hermes-build/bin:$PATH"
+          xcodegen --version || {
+            mkdir -p "$HOME/hermes-build/bin"
+            curl -fsSL -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip
+            rm -rf /tmp/xcodegen_dl && mkdir -p /tmp/xcodegen_dl && (cd /tmp/xcodegen_dl && unzip -q /tmp/xcodegen.zip)
+            find /tmp/xcodegen_dl -maxdepth 4 -name xcodegen -type f -exec cp {} "$HOME/hermes-build/bin/xcodegen" \;
+            chmod +x "$HOME/hermes-build/bin/xcodegen"
+            xcodegen --version
+          }
 
       - name: Generate Xcode project
-        run: xcodegen generate
+        run: |
+          set -o pipefail
+          export PATH="$HOME/hermes-build/bin:$PATH"
+          xcodegen generate
 
       - name: Build
         run: |
           set -o pipefail
+          # arch=arm64 must be pinned: on this host a generic 'platform=macOS'
+          # destination resolves to x86_64, while SwiftPM builds deps for arm64
+          # only -> "Unable to resolve module dependency".
           xcodebuild \
             -project KRemote.xcodeproj \
             -scheme KRemote \
             -configuration Debug \
-            -destination 'platform=macOS' \
+            -destination 'platform=macOS,arch=arm64' \
             -derivedDataPath build \
             -skipPackagePluginValidation \
             -skipMacroValidation \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO \
             build
 
