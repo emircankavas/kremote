@@ -157,4 +157,71 @@ final class ConfConsImportTests: XCTestCase {
         XCTAssertEqual(RemoteProtocol.ssh.defaultPort, 22)
         XCTAssertEqual(RemoteProtocol.https.defaultPort, 443)
     }
+
+    // MARK: - RDP attributes
+
+    func testImportReadsRDPAttributesFromAFolder() throws {
+        let result = try ConfConsImporter.importTree(from: fixtureData())
+        let prod = try XCTUnwrap(result.roots.first { $0.name == "Prod" })
+        let rdp = try XCTUnwrap(prod.rdp, "the folder's RDP defaults must be carried")
+        XCTAssertEqual(rdp.domain, "CORP")
+        XCTAssertEqual(rdp.resolution, .fitToWindow)
+        XCTAssertEqual(rdp.colorDepth, 16)
+        XCTAssertEqual(rdp.redirectClipboard, true)
+        XCTAssertEqual(rdp.redirectDrives, false)
+        // Not present in the file -> nil (inherit), not a made-up default.
+        XCTAssertNil(rdp.redirectPrinters)
+    }
+
+    func testImportLeavesUnsetRDPAttributesNil() throws {
+        let result = try ConfConsImporter.importTree(from: fixtureData())
+        let lab = try XCTUnwrap(result.roots.first { $0.name == "Lab" })
+        // Lab declares RDP as its protocol but sets no appearance/redirection
+        // attributes, so it carries no RDP block at all (rather than an empty one).
+        XCTAssertNil(lab.rdp)
+        // An SSH leaf has no RDP block either.
+        let web = try XCTUnwrap(
+            result.roots.first { $0.name == "Prod" }?.children.first { $0.name == "web01" }
+        )
+        XCTAssertNil(web.rdp)
+    }
+
+    func testRDPDefaultsInheritToAnRDPChild() throws {
+        let result = try ConfConsImporter.importTree(from: fixtureData())
+        // The web01 leaf is SSH, but a folder's RDP defaults still resolve for it;
+        // what matters is that they reach an RDP connection. Reuse the folder.
+        let prod = try XCTUnwrap(result.roots.first { $0.name == "Prod" })
+        let rdpChild = ConnectionNode(kind: .connection, name: "win", host: "192.0.2.20", protocolName: "RDP")
+        prod.children.append(rdpChild)
+
+        let options = try XCTUnwrap(ConnectionNode.effective(for: rdpChild.id, in: result.roots)).rdp
+        XCTAssertEqual(options.domain, "CORP")
+        XCTAssertEqual(options.resolution, .fitToWindow)
+        XCTAssertEqual(options.colorDepth, 16)
+    }
+
+    func testRPDAttributesRoundTripThroughTheFile() throws {
+        let first = try ConfConsImporter.importTree(from: fixtureData())
+        let xml = try ConfConsSerializer.serialize(first.roots, iterations: 1000)
+        let second = try ConfConsImporter.importTree(from: Data(xml.utf8))
+
+        func windowsFolder(_ result: ConfConsImporter.ImportResult) throws -> RDPSettings {
+            try XCTUnwrap(try XCTUnwrap(result.roots.first { $0.name == "Prod" }).rdp)
+        }
+        let before = try windowsFolder(first)
+        let after = try windowsFolder(second)
+        XCTAssertEqual(after.domain, before.domain)
+        XCTAssertEqual(after.resolution, before.resolution)
+        XCTAssertEqual(after.colorDepth, before.colorDepth)
+        XCTAssertEqual(after.redirectClipboard, before.redirectClipboard)
+        XCTAssertEqual(after.redirectDrives, before.redirectDrives)
+    }
+
+    func testSerializerDoesNotEmitEmptyRDPAttributes() throws {
+        let node = ConnectionNode(kind: .connection, name: "s", host: "h", protocolName: "SSH2")
+        let xml = try ConfConsSerializer.serialize([node], iterations: 1000)
+        XCTAssertFalse(xml.contains("Resolution="))
+        XCTAssertFalse(xml.contains("Colors="))
+        XCTAssertFalse(xml.contains("Redirect"))
+    }
 }

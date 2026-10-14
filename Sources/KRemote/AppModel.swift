@@ -202,6 +202,7 @@ final class AppModel {
         node.protocolName = draft.protocolName.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         node.identityFile = draft.identityFile.trimmingCharacters(in: .whitespacesAndNewlines)
         node.remoteCommand = draft.remoteCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        node.rdp = draft.rdp.isEmpty ? nil : draft.rdp
         node.password = draft.password
 
         do {

@@ -1,0 +1,325 @@
+import Foundation
+
+/// How the remote desktop is sized against the pane it is shown in.
+///
+/// Mirrors mRemoteNG's `Resolution` property. The legacy fixed pixel sizes
+/// (`Res1366x768` and friends) were removed upstream; a bare pixel size that
+/// turns up in an old file is kept as `.custom` rather than dropped.
+public enum RDPResolutionMode: String, Codable, Sendable, CaseIterable {
+    case smartSize = "SmartSize"
+    case fitToWindow = "FitToWindow"
+    case fullscreen = "Fullscreen"
+    /// Connect at an explicit size (`customWidth` × `customHeight`).
+    case custom = "Custom"
+
+    public var displayName: String {
+        switch self {
+        case .smartSize: return "Smart size"
+        case .fitToWindow: return "Fit to panel"
+        case .fullscreen: return "Fullscreen"
+        case .custom: return "Custom"
+        }
+    }
+
+    /// Parses a value out of an mRemoteNG `Resolution` attribute.
+    ///
+    /// Accepts the mode names as well as any pixel size (`1920x1080`, and the
+    /// `Res1920x1080` spelling older files used).
+    public init(mRemoteNG raw: String) {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let exact = RDPResolutionMode(rawValue: value) {
+            self = exact
+            return
+        }
+        switch value.lowercased() {
+        case "fittowindow", "fittopanel":
+            self = .fitToWindow
+        case "fullscreen":
+            self = .fullscreen
+        case "smartsize", "":
+            self = .smartSize
+        default:
+            self = RDPResolutionMode.parsePixelSize(value) != nil ? .custom : .smartSize
+        }
+    }
+
+    /// Reads `1920x1080` (or `Res1920x1080`) into a width/height pair.
+    public static func parsePixelSize(_ string: String) -> (width: Int, height: Int)? {
+        var text = string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if text.hasPrefix("res") { text = String(text.dropFirst(3)) }
+        let parts = text.split(separator: "x", omittingEmptySubsequences: true)
+        guard parts.count == 2,
+              let width = Int(parts[0]), let height = Int(parts[1]),
+              width > 0, height > 0 else { return nil }
+        return (width, height)
+    }
+}
+
+/// RDP-specific overrides set directly on a node.
+///
+/// Every field is optional and `nil` means "inherit from the parent folder",
+/// exactly like an empty string or port `0` elsewhere in the tree. That lets a
+/// folder carry the appearance/redirection defaults its connections share.
+public struct RDPSettings: Equatable, Sendable, Codable {
+    /// Windows domain (or `DOMAIN\user` split off by the editor).
+    public var domain: String?
+    public var resolution: RDPResolutionMode?
+    public var customWidth: Int?
+    public var customHeight: Int?
+    /// Colour depth in bits: 8, 16, 24 or 32.
+    public var colorDepth: Int?
+    public var redirectClipboard: Bool?
+    public var redirectDrives: Bool?
+    public var redirectPrinters: Bool?
+    public var redirectSound: Bool?
+    public var redirectKeys: Bool?
+
+    public init(
+        domain: String? = nil,
+        resolution: RDPResolutionMode? = nil,
+        customWidth: Int? = nil,
+        customHeight: Int? = nil,
+        colorDepth: Int? = nil,
+        redirectClipboard: Bool? = nil,
+        redirectDrives: Bool? = nil,
+        redirectPrinters: Bool? = nil,
+        redirectSound: Bool? = nil,
+        redirectKeys: Bool? = nil
+    ) {
+        self.domain = domain
+        self.resolution = resolution
+        self.customWidth = customWidth
+        self.customHeight = customHeight
+        self.colorDepth = colorDepth
+        self.redirectClipboard = redirectClipboard
+        self.redirectDrives = redirectDrives
+        self.redirectPrinters = redirectPrinters
+        self.redirectSound = redirectSound
+        self.redirectKeys = redirectKeys
+    }
+
+    /// True when nothing is set, so `nil` folders are not written to disk.
+    public var isEmpty: Bool { self == RDPSettings() }
+
+    private enum CodingKeys: String, CodingKey {
+        case domain, resolution, customWidth, customHeight, colorDepth
+        case redirectClipboard, redirectDrives, redirectPrinters, redirectSound, redirectKeys
+    }
+
+    /// Only the fields that are actually set are written, keeping the JSON (and
+    /// the confCons round-trip) free of noise.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(domain, forKey: .domain)
+        try container.encodeIfPresent(resolution, forKey: .resolution)
+        try container.encodeIfPresent(customWidth, forKey: .customWidth)
+        try container.encodeIfPresent(customHeight, forKey: .customHeight)
+        try container.encodeIfPresent(colorDepth, forKey: .colorDepth)
+        try container.encodeIfPresent(redirectClipboard, forKey: .redirectClipboard)
+        try container.encodeIfPresent(redirectDrives, forKey: .redirectDrives)
+        try container.encodeIfPresent(redirectPrinters, forKey: .redirectPrinters)
+        try container.encodeIfPresent(redirectSound, forKey: .redirectSound)
+        try container.encodeIfPresent(redirectKeys, forKey: .redirectKeys)
+    }
+
+    /// Tolerant decode: a malformed `resolution` falls back to the mode names'
+    /// own spelling, and any casing is accepted (the file may have been written
+    /// by hand or by an older build).
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.domain = try container.decodeIfPresent(String.self, forKey: .domain)
+        if let raw = try container.decodeIfPresent(String.self, forKey: .resolution) {
+            self.resolution = RDPResolutionMode(mRemoteNG: raw)
+        } else {
+            self.resolution = nil
+        }
+        self.customWidth = try container.decodeIfPresent(Int.self, forKey: .customWidth)
+        self.customHeight = try container.decodeIfPresent(Int.self, forKey: .customHeight)
+        self.colorDepth = try container.decodeIfPresent(Int.self, forKey: .colorDepth)
+        self.redirectClipboard = try container.decodeIfPresent(Bool.self, forKey: .redirectClipboard)
+        self.redirectDrives = try container.decodeIfPresent(Bool.self, forKey: .redirectDrives)
+        self.redirectPrinters = try container.decodeIfPresent(Bool.self, forKey: .redirectPrinters)
+        self.redirectSound = try container.decodeIfPresent(Bool.self, forKey: .redirectSound)
+        self.redirectKeys = try container.decodeIfPresent(Bool.self, forKey: .redirectKeys)
+    }
+}
+
+/// The resolved RDP settings of a node, after inheritance is folded in.
+public struct RDPOptions: Equatable, Sendable {
+    public var domain: String
+    public var resolution: RDPResolutionMode
+    public var customWidth: Int
+    public var customHeight: Int
+    /// 8, 16, 24 or 32.
+    public var colorDepth: Int
+    public var redirectClipboard: Bool
+    public var redirectDrives: Bool
+    public var redirectPrinters: Bool
+    public var redirectSound: Bool
+    public var redirectKeys: Bool
+
+    public init(
+        domain: String = "",
+        resolution: RDPResolutionMode = .smartSize,
+        customWidth: Int = 1920,
+        customHeight: Int = 1080,
+        colorDepth: Int = 32,
+        redirectClipboard: Bool = true,
+        redirectDrives: Bool = false,
+        redirectPrinters: Bool = false,
+        redirectSound: Bool = true,
+        redirectKeys: Bool = false
+    ) {
+        self.domain = domain
+        self.resolution = resolution
+        self.customWidth = customWidth
+        self.customHeight = customHeight
+        self.colorDepth = colorDepth
+        self.redirectClipboard = redirectClipboard
+        self.redirectDrives = redirectDrives
+        self.redirectPrinters = redirectPrinters
+        self.redirectSound = redirectSound
+        self.redirectKeys = redirectKeys
+    }
+
+    /// What a root node starts from before any folder contributes.
+    public static let `default` = RDPOptions()
+
+    /// `DOMAIN\user` as Windows clients spell it, or just the user when no
+    /// domain resolved.
+    public func qualifiedUser(_ username: String) -> String {
+        let domain = domain.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !domain.isEmpty, !username.isEmpty else { return username }
+        // A `user@domain` style name already carries its realm.
+        if username.contains("@") { return username }
+        return "\(domain)\\\(username)"
+    }
+
+    /// The desktop size to request, or nil when the client decides (fullscreen
+    /// and fit-to-panel negotiate against the pane).
+    public var explicitDesktopSize: (width: Int, height: Int)? {
+        switch resolution {
+        case .custom: return (max(640, customWidth), max(480, customHeight))
+        case .fullscreen, .fitToWindow, .smartSize: return nil
+        }
+    }
+
+    /// Folds `settings` over what was inherited; a `nil` field keeps `base`.
+    public func merging(_ settings: RDPSettings) -> RDPOptions {
+        var merged = self
+        if let domain = settings.domain, !domain.isEmpty { merged.domain = domain }
+        if let resolution = settings.resolution { merged.resolution = resolution }
+        if let width = settings.customWidth, width > 0 { merged.customWidth = width }
+        if let height = settings.customHeight, height > 0 { merged.customHeight = height }
+        if let depth = settings.colorDepth, depth > 0 { merged.colorDepth = depth }
+        if let value = settings.redirectClipboard { merged.redirectClipboard = value }
+        if let value = settings.redirectDrives { merged.redirectDrives = value }
+        if let value = settings.redirectPrinters { merged.redirectPrinters = value }
+        if let value = settings.redirectSound { merged.redirectSound = value }
+        if let value = settings.redirectKeys { merged.redirectKeys = value }
+        return merged
+    }
+
+    /// One-line description for the editor footer and the pane status bar.
+    public var summary: String {
+        var parts = ["\(resolution.displayName)", "\(colorDepth)-bit"]
+        if resolution == .custom { parts[0] = "\(resolution.displayName) \(customWidth)×\(customHeight)" }
+        var redirects: [String] = []
+        if redirectClipboard { redirects.append("clipboard") }
+        if redirectDrives { redirects.append("drives") }
+        if redirectPrinters { redirects.append("printers") }
+        if redirectSound { redirects.append("sound") }
+        if redirectKeys { redirects.append("keys") }
+        if !redirects.isEmpty { parts.append(redirects.joined(separator: ", ")) }
+        if !domain.isEmpty { parts.append("domain \(domain)") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+// MARK: - mRemoteNG spellings
+
+extension RDPSettings {
+    /// Reads mRemoteNG's RDP attributes off a `<Node>`. Case is already
+    /// canonicalised by the importer; unknown values fall back to `nil`
+    /// (inherit) so a file with an exotic setting still imports.
+    public static func fromConfConsAttributes(_ attributes: [String: String]) -> RDPSettings {
+        var settings = RDPSettings()
+
+        let domain = attributes["Domain"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !domain.isEmpty { settings.domain = domain }
+
+        if let rawResolution = attributes["Resolution"], !rawResolution.isEmpty {
+            settings.resolution = RDPResolutionMode(mRemoteNG: rawResolution)
+            if settings.resolution == .custom,
+               let size = RDPResolutionMode.parsePixelSize(rawResolution) {
+                settings.customWidth = size.width
+                settings.customHeight = size.height
+            } else if settings.resolution == .custom,
+                      let width = Int(attributes["ResolutionWidth"] ?? ""),
+                      let height = Int(attributes["ResolutionHeight"] ?? "") {
+                settings.customWidth = width
+                settings.customHeight = height
+            }
+        }
+
+        if let depth = Self.colorDepth(fromConfCons: attributes["Colors"]) {
+            settings.colorDepth = depth
+        }
+
+        settings.redirectClipboard = Self.bool(fromConfCons: attributes["RedirectClipboard"])
+        settings.redirectDrives = Self.bool(fromConfCons: attributes["RedirectDrives"])
+        settings.redirectPrinters = Self.bool(fromConfCons: attributes["RedirectPrinters"])
+        // mRemoteNG writes `RedirectSound` in some versions and `RedirectAudio`
+        // in others, both as a boolean.
+        settings.redirectSound = Self.bool(fromConfCons: attributes["RedirectSound"])
+            ?? Self.bool(fromConfCons: attributes["RedirectAudio"])
+        settings.redirectKeys = Self.bool(fromConfCons: attributes["RedirectKeys"])
+
+        return settings
+    }
+
+    /// mRemoteNG writes the colour depth as `32bit`, `24bit`, … (older files
+    /// used a bare number).
+    static func colorDepth(fromConfCons raw: String?) -> Int? {
+        guard let raw else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !value.isEmpty else { return nil }
+        let digits = value.hasSuffix("bit") ? String(value.dropLast(3)) : value
+        guard let depth = Int(digits), [8, 16, 24, 32].contains(depth) else { return nil }
+        return depth
+    }
+
+    /// mRemoteNG booleans are `"true"` / `"false"`; empty means "not set".
+    static func bool(fromConfCons raw: String?) -> Bool? {
+        guard let raw else { return nil }
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "true": return true
+        case "false": return false
+        default: return nil
+        }
+    }
+
+    /// The attributes to write back out, so `ConfConsSerializer` round-trips
+    /// what the importer read.
+    public var confConsAttributes: [(String, String)] {
+        var attributes: [(String, String)] = []
+        if let domain, !domain.isEmpty { attributes.append(("Domain", domain)) }
+        if let resolution {
+            switch resolution {
+            case .custom:
+                let width = customWidth ?? 1920
+                let height = customHeight ?? 1080
+                attributes.append(("Resolution", "\(width)x\(height)"))
+            default:
+                attributes.append(("Resolution", resolution.rawValue))
+            }
+        }
+        if let colorDepth { attributes.append(("Colors", "\(colorDepth)bit")) }
+        if let redirectClipboard { attributes.append(("RedirectClipboard", "\(redirectClipboard)")) }
+        if let redirectDrives { attributes.append(("RedirectDrives", "\(redirectDrives)")) }
+        if let redirectPrinters { attributes.append(("RedirectPrinters", "\(redirectPrinters)")) }
+        if let redirectSound { attributes.append(("RedirectSound", "\(redirectSound)")) }
+        if let redirectKeys { attributes.append(("RedirectKeys", "\(redirectKeys)")) }
+        return attributes
+    }
+}

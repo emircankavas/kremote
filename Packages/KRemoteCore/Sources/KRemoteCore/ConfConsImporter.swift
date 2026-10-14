@@ -98,6 +98,9 @@ public enum ConfConsImporter {
         let port = Int(parsed.attributes["Port"] ?? "") ?? 0
         let username = parsed.attributes["Username"] ?? ""
         let protocolName = parsed.attributes["Protocol"] ?? ""
+        // RDP appearance/redirection attributes; empty means "inherit", which is
+        // exactly how a folder carrying defaults behaves.
+        let rdp = RDPSettings.fromConfConsAttributes(parsed.attributes)
 
         var password = ""
         if !isContainer, let field = parsed.attributes["Password"], !field.isEmpty {
@@ -115,6 +118,7 @@ public enum ConfConsImporter {
             port: port,
             username: username,
             protocolName: protocolName,
+            rdp: rdp.isEmpty ? nil : rdp,
             password: password,
             children: children
         )

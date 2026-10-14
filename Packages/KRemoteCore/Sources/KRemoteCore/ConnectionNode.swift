@@ -31,6 +31,11 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
     /// (and ultimately an interactive shell).
     public var remoteCommand: String = ""
 
+    /// RDP-specific overrides (domain, resolution, colour depth, redirections).
+    /// `nil` fields inherit from the parent folder; `nil` as a whole means the
+    /// node carries no RDP overrides at all and is not written to disk.
+    public var rdp: RDPSettings?
+
     /// Directly-set password. Deliberately **not** in `CodingKeys`: it is never
     /// written to the JSON tree. `AppModel` mirrors it into the Keychain.
     public var password: String = ""
@@ -40,6 +45,7 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
     private enum CodingKeys: String, CodingKey {
         case id, kind, name, host, port, username, protocolName, children
         case identityFile, remoteCommand
+        case rdp
     }
 
     public init(
@@ -52,6 +58,7 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
         protocolName: String = "",
         identityFile: String = "",
         remoteCommand: String = "",
+        rdp: RDPSettings? = nil,
         password: String = "",
         children: [ConnectionNode] = []
     ) {
@@ -64,6 +71,7 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
         self.protocolName = protocolName
         self.identityFile = identityFile
         self.remoteCommand = remoteCommand
+        self.rdp = rdp
         self.password = password
         self.children = children
     }
@@ -83,6 +91,8 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
         self.protocolName = try container.decodeIfPresent(String.self, forKey: .protocolName) ?? ""
         self.identityFile = try container.decodeIfPresent(String.self, forKey: .identityFile) ?? ""
         self.remoteCommand = try container.decodeIfPresent(String.self, forKey: .remoteCommand) ?? ""
+        // A malformed `rdp` block must not sink the whole tree — fall back to nil.
+        self.rdp = (try? container.decodeIfPresent(RDPSettings.self, forKey: .rdp)) ?? nil
         // Passwords live in the Keychain, never in the tree file.
         self.password = ""
         self.children = try container.decodeIfPresent([ConnectionNode].self, forKey: .children) ?? []
@@ -99,16 +109,27 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
         try container.encode(protocolName, forKey: .protocolName)
         try container.encode(identityFile, forKey: .identityFile)
         try container.encode(remoteCommand, forKey: .remoteCommand)
+        if let rdp, !rdp.isEmpty { try container.encode(rdp, forKey: .rdp) }
         try container.encode(children, forKey: .children)
     }
 
     public var isFolder: Bool { kind == .folder }
 
     /// Whether KRemote can actually open a session for this leaf's resolved
-    /// protocol. Only SSH-family protocols are implemented; the rest are imported
-    /// and stored so the tree round-trips, but have no session yet.
-    public var supportsSSH: Bool {
-        RemoteProtocol(protocolName.isEmpty ? "SSH" : protocolName).isSSHFamily
+    /// protocol. SSH-family protocols run the system `ssh`; RDP runs FreeRDP.
+    /// Anything else is imported and stored so the tree round-trips, but has no
+    /// session yet.
+    public var supportsSSH: Bool { resolvedProtocol.isSSHFamily }
+
+    /// Whether this leaf's resolved protocol is RDP (incl. `RDP` variants).
+    public var supportsRDP: Bool { resolvedProtocol.isRDPFamily }
+
+    /// Whether a session can be opened at all (SSH or RDP).
+    public var isOpenable: Bool { !isFolder && (supportsSSH || supportsRDP) }
+
+    /// The protocol this node resolves to, treating blank as the SSH default.
+    public var resolvedProtocol: RemoteProtocol {
+        RemoteProtocol(protocolName.isEmpty ? "SSH" : protocolName)
     }
 
     /// Optional-typed children for SwiftUI's `OutlineGroup`; nil marks a leaf.
@@ -129,6 +150,8 @@ public struct EffectiveConnection: Equatable, Sendable {
     public var password: String
     public var identityFile: String
     public var remoteCommand: String
+    /// RDP settings with folder inheritance already folded in.
+    public var rdp: RDPOptions
 
     public init(
         host: String = "",
@@ -137,7 +160,8 @@ public struct EffectiveConnection: Equatable, Sendable {
         protocolName: String = "SSH",
         password: String = "",
         identityFile: String = "",
-        remoteCommand: String = ""
+        remoteCommand: String = "",
+        rdp: RDPOptions = .default
     ) {
         self.host = host
         self.port = port
@@ -146,6 +170,7 @@ public struct EffectiveConnection: Equatable, Sendable {
         self.password = password
         self.identityFile = identityFile
         self.remoteCommand = remoteCommand
+        self.rdp = rdp
     }
 
     /// What a root node starts from before any folder contributes.
@@ -162,11 +187,12 @@ public struct EffectiveConnection: Equatable, Sendable {
 extension ConnectionNode {
     /// Folds this node's values over what it inherited.
     ///
-    /// Only **credentials** inherit: username, password and identity file. A
-    /// folder is a group of servers that log in the same way, so those belong on
-    /// the folder. Host, protocol, port and remote command are properties of an
-    /// individual connection — a folder routinely holds SSH, RDP and HTTPS
-    /// children at once, so inheriting a protocol from it would be wrong.
+    /// Only **credentials and RDP appearance/redirection settings** inherit:
+    /// username, password, identity file, and the RDP options a group of servers
+    /// shares. A folder is a group that logs in (and often looks) the same way,
+    /// so those belong on the folder. Host, protocol, port and remote command are
+    /// properties of an individual connection — a folder routinely holds SSH, RDP
+    /// and HTTPS children at once, so inheriting a protocol from it would be wrong.
     public func effective(inheriting parent: EffectiveConnection?) -> EffectiveConnection {
         let base = parent ?? .default
 
@@ -186,7 +212,8 @@ extension ConnectionNode {
             protocolName: resolvedProtocol,
             password: password.isEmpty ? base.password : password,
             identityFile: identityFile.isEmpty ? base.identityFile : identityFile,
-            remoteCommand: remoteCommand
+            remoteCommand: remoteCommand,
+            rdp: base.rdp.merging(rdp ?? RDPSettings())
         )
     }
 
@@ -275,7 +302,7 @@ extension ConnectionNode {
         to newParent: UUID?,
         in roots: inout [ConnectionNode]
     ) -> Bool {
-        guard let moving = find(node, in: roots) else { return false }
+        guard find(node, in: roots) != nil else { return false }
         if let newParent {
             guard find(newParent, in: roots) != nil else { return false }
             // Refuse to drop a node into itself or its own descendants.
@@ -308,6 +335,8 @@ public struct ConnectionDraft: Equatable {
     public var identityFile: String
     public var remoteCommand: String
     public var password: String
+    /// Directly-set RDP overrides; `nil` fields mean "inherit from the folder".
+    public var rdp: RDPSettings
 
     public init(
         id: UUID,
@@ -318,7 +347,8 @@ public struct ConnectionDraft: Equatable {
         protocolName: String = "",
         identityFile: String = "",
         remoteCommand: String = "",
-        password: String = ""
+        password: String = "",
+        rdp: RDPSettings = RDPSettings()
     ) {
         self.id = id
         self.name = name
@@ -329,6 +359,7 @@ public struct ConnectionDraft: Equatable {
         self.identityFile = identityFile
         self.remoteCommand = remoteCommand
         self.password = password
+        self.rdp = rdp
     }
 
     public init(from node: ConnectionNode) {
@@ -341,8 +372,15 @@ public struct ConnectionDraft: Equatable {
             protocolName: node.protocolName,
             identityFile: node.identityFile,
             remoteCommand: node.remoteCommand,
-            password: node.password
+            password: node.password,
+            rdp: node.rdp ?? RDPSettings()
         )
+    }
+
+    /// True when the node's resolved protocol is RDP — used by the editor to
+    /// show the RDP section.
+    public var isRDP: Bool {
+        RemoteProtocol(protocolName.isEmpty ? "SSH" : protocolName).isRDPFamily
     }
 }
 
@@ -358,7 +396,8 @@ extension ConnectionNode {
         host: String,
         port: Int = 0,
         username: String = "",
-        protocolName: String = ""
+        protocolName: String = "",
+        rdp: RDPSettings? = nil
     ) -> ConnectionNode {
         ConnectionNode(
             kind: .connection,
@@ -366,7 +405,8 @@ extension ConnectionNode {
             host: host,
             port: port,
             username: username,
-            protocolName: protocolName
+            protocolName: protocolName,
+            rdp: rdp
         )
     }
 

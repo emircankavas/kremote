@@ -26,6 +26,11 @@ public struct RemoteProtocol: RawRepresentable, Codable, Hashable, Sendable {
         }
     }
 
+    /// Whether this is RDP (`RDP`, and the `RDP1`-style variants some files use).
+    public var isRDPFamily: Bool {
+        rawValue.uppercased().hasPrefix("RDP")
+    }
+
     /// The port mRemoteNG uses when a node leaves `Port` empty.
     public var defaultPort: Int {
         switch rawValue.uppercased() {

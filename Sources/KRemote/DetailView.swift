@@ -274,6 +274,14 @@ private struct SessionContent: View {
                 onFocus: { model.focus(session.id) }
             )
             .id(session.generation)
+        } else if let node = model.find(session.nodeID), node.supportsRDP {
+            RDPSessionContent(
+                nodeID: node.id,
+                session: session,
+                onFocus: { model.focus(session.id) },
+                onClose: { model.closeSession(session.id) }
+            )
+            .id(session.generation)
         } else if let node = model.find(session.nodeID) {
             UnsupportedProtocolView(name: node.name, protocolName: model.effective(node.id)?.protocolName ?? "")
         } else {
@@ -386,7 +394,7 @@ private struct UnsupportedProtocolView: View {
                 .font(.system(size: 40, weight: .light))
                 .foregroundStyle(.orange)
             Text(name).font(.title3)
-            Text("\(protocolName.isEmpty ? "This protocol" : protocolName) is not supported yet. Only SSH sessions can be opened.")
+            Text("\(protocolName.isEmpty ? "This protocol" : protocolName) is not supported yet. SSH and RDP sessions can be opened.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -394,5 +402,139 @@ private struct UnsupportedProtocolView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.background)
+    }
+}
+
+/// A live RDP session (FreeRDP) with its own status bar.
+///
+/// Kept separate from `SessionContent`'s terminal branch because the two share
+/// nothing but the session identity: an RDP pane has no root command, no remote
+/// title escape and no reconnect-by-generation semantics beyond rebuilding.
+private struct RDPSessionContent: View {
+    @Environment(AppModel.self) private var model
+    let nodeID: ConnectionNode.ID
+    let session: Session
+    let onFocus: () -> Void
+    let onClose: () -> Void
+
+    @State private var state: RDPClientState = .idle
+
+    private var options: RDPOptions { model.effective(nodeID)?.rdp ?? .default }
+    private var target: String {
+        let effective = model.effective(nodeID)
+        let user = effective.map { options.qualifiedUser($0.username) } ?? ""
+        let host = effective?.host ?? ""
+        let port = effective?.port ?? 3389
+        return user.isEmpty ? "\(host):\(port)" : "\(user)@\(host):\(port)"
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            statusBar
+            Divider()
+            content
+        }
+        .background(.background)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onFocus)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if RDPClient.isAvailable {
+            RDPClientView(
+                host: model.effective(nodeID)?.host ?? "",
+                port: model.effective(nodeID)?.port ?? 3389,
+                username: model.effective(nodeID)?.username ?? "",
+                password: model.effective(nodeID)?.password ?? "",
+                options: options,
+                onStateChange: { newState in
+                    guard model.currentGeneration(of: session.id) == session.generation else { return }
+                    state = newState
+                    // A clean remote disconnect closes the tab; a failure keeps it
+                    // open so its reason stays on screen.
+                    if case .disconnected(let reason) = newState, reason == nil {
+                        onClose()
+                    }
+                },
+                onFocus: onFocus
+            )
+            .id(session.generation)
+        } else {
+            missingClientNotice
+        }
+    }
+
+    /// Shown when the FreeRDP library is not linked into this build.
+    private var missingClientNotice: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "display.trianglebadge.exclamationmark")
+                .font(.system(size: 40, weight: .light))
+                .foregroundStyle(.orange)
+            Text("RDP support is not available in this build")
+                .font(.title3)
+            Text("This build was compiled without the FreeRDP client library. Install it with `brew install freerdp` and rebuild, or use a release build which bundles it.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.background)
+    }
+
+    private var statusBar: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(statusColor)
+                .frame(width: 8, height: 8)
+            Text(statusText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer()
+            Text(target)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+            Text(options.summary)
+                .font(.caption2)
+                .foregroundStyle(.quaternary)
+                .lineLimit(1)
+            if isDisconnected {
+                Button("Reconnect") { model.reconnect(session.id) }
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 24)
+        .background(.bar)
+    }
+
+    private var isDisconnected: Bool {
+        if case .disconnected = state { return true }
+        return false
+    }
+
+    private var statusColor: Color {
+        switch state {
+        case .connected: return .green
+        case .connecting: return .orange
+        case .idle: return .gray
+        case .disconnected: return .red
+        case .failed: return .red
+        }
+    }
+
+    private var statusText: String {
+        switch state {
+        case .idle: return "Idle"
+        case .connecting: return "Connecting…"
+        case .connected: return "Connected"
+        case .disconnected(let reason):
+            if let reason, !reason.isEmpty { return "Disconnected — \(reason)" }
+            return "Disconnected"
+        case .failed(let reason): return "Failed — \(reason)"
+        }
     }
 }

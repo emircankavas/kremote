@@ -78,6 +78,26 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
+      - name: Cache FreeRDP build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.home }}/hermes-build/freerdp-install
+            ${{ runner.home }}/hermes-build/freerdp-build
+          key: freerdp-${{ runner.os }}-${{ runner.arch }}-3.32.2-openh264
+
+      - name: Build FreeRDP (permissive, OpenH264, no ffmpeg)
+        run: |
+          set -o pipefail
+          # Homebrew provides the build deps (cmake/ninja/pkgconf + openssl,
+          # openh264, jansson, uriparser, jpeg-turbo), NOT freerdp itself: its
+          # bottle hard-depends on GPL-3.0 ffmpeg and pulls in X11/SDL/USB.
+          export PATH="/opt/homebrew/bin:$PATH"
+          brew list --versions cmake ninja pkgconf openh264 jansson uriparser jpeg-turbo openssl@4 >/dev/null 2>&1 || \
+            brew install cmake ninja pkgconf openh264 jansson uriparser jpeg-turbo openssl@4
+          # Built from source so nothing GPL-3.0 is embedded. ~10 MB of libraries.
+          bash scripts/build-freerdp.sh "$HOME/hermes-build/freerdp-install"
+
       - name: Verify the bundle was produced
         run: |
           set -o pipefail
@@ -89,13 +109,14 @@ jobs:
           test -x "$APP/Contents/MacOS/KRemote" || { echo "::error::missing executable"; exit 1; }
           echo "Bundle size:"; du -sh "$APP"
 
-      - name: Sign with the stable identity
+      - name: Embed the RDP libraries and sign
         env:
           KC_PASSWORD: ${{ secrets.SIGNING_KEYCHAIN_PASSWORD }}
         run: |
           set -o pipefail
           APP="build/Build/Products/Release/KRemote.app"
           KEYCHAIN="$HOME/hermes-build/signing/kremote-signing.keychain-db"
+          IDENTITY="-"
 
           # A stable identity matters, not just "signed": an ad-hoc signature's
           # designated requirement is a cdhash that changes every build, which
@@ -104,17 +125,20 @@ jobs:
           # the requirement to `certificate leaf = H"..."`, which survives updates.
           if [ -n "${KC_PASSWORD:-}" ] && [ -f "$KEYCHAIN" ]; then
             security unlock-keychain -p "$KC_PASSWORD" "$KEYCHAIN"
-            codesign --force --deep --sign "KRemote Dev" "$APP"
+            IDENTITY="KRemote Dev"
           else
             echo "::warning::Stable signing identity unavailable; falling back to ad-hoc."
             echo "::warning::Keychain passwords will be re-prompted after this update."
-            codesign --force --deep --sign - "$APP"
           fi
+
+          # Copies the RDP libraries into Contents/Frameworks/, rewrites install
+          # names, re-signs, and fails if anything outside the bundle is still
+          # needed or if a GPL/X11 library slipped in.
+          bash scripts/embed-freerdp.sh "$APP" "$IDENTITY"
 
           codesign --verify --verbose=2 "$APP" || true
           echo "Designated requirement:"
           codesign -d -r- "$APP" 2>&1 | sed -n '2,3p'
-          codesign -dv "$APP" 2>&1 | sed -n '1,6p'
 
       - name: Package .dmg
         run: |

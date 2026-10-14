@@ -56,6 +56,38 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.emircankavas.kremote
         PRODUCT_NAME: KRemote
         INFOPLIST_FILE: Info.plist
+        # The FreeRDP bridge is C, exposed through a bridging header. Installing
+        # FreeRDP is a build-machine step (scripts/build-freerdp.sh or
+        # `brew install freerdp`); the release bundle embeds the libraries so end
+        # users need nothing. See README ▸ RDP sessions.
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/KRemote/KRemote-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(FREERDP_ROOT)/include/freerdp3
+          - $(FREERDP_ROOT)/include/winpr3
+          - /opt/homebrew/include
+        # Point at a permissively-licensed FreeRDP build (OpenH264, no ffmpeg):
+        #   FREERDP_ROOT=$HOME/hermes-build/freerdp-install
+        # Falls back to Homebrew's prefix so a plain `brew install freerdp` also
+        # works for local development.
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - $(FREERDP_ROOT)/lib
+          - /opt/homebrew/lib
+        FREERDP_ROOT: $(HOME)/hermes-build/freerdp-install
+        # Where to find the RDP dylibs at runtime. `@executable_path/../Frameworks`
+        # is what the release bundle uses (the libraries are copied into the .app);
+        # `$(FREERDP_ROOT)/lib` covers a plain local/debug run.
+        LD_RUNPATH_SEARCH_PATHS:
+          - $(inherited)
+          - "@executable_path/../Frameworks"
+          - $(FREERDP_ROOT)/lib
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -lfreerdp3
+          - -lfreerdp-client3
+          - -lwinpr3
+          - -lopenh264
 
 schemes:
   KRemote:

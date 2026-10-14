@@ -41,6 +41,25 @@ jobs:
             xcodegen --version
           }
 
+      - name: Cache FreeRDP build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.home }}/hermes-build/freerdp-install
+            ${{ runner.home }}/hermes-build/freerdp-build
+          key: freerdp-${{ runner.os }}-${{ runner.arch }}-3.32.2-openh264
+
+      - name: Build FreeRDP (permissive, OpenH264, no ffmpeg)
+        run: |
+          set -o pipefail
+          # Homebrew provides the build deps (cmake/ninja/pkgconf + openssl,
+          # openh264, jansson, uriparser, jpeg-turbo), NOT freerdp itself: its
+          # bottle hard-depends on GPL-3.0 ffmpeg and pulls in X11/SDL/USB.
+          export PATH="/opt/homebrew/bin:$PATH"
+          brew list --versions cmake ninja pkgconf openh264 jansson uriparser jpeg-turbo openssl@4 >/dev/null 2>&1 || \
+            brew install cmake ninja pkgconf openh264 jansson uriparser jpeg-turbo openssl@4
+          bash scripts/build-freerdp.sh "$HOME/hermes-build/freerdp-install"
+
       - name: Generate Xcode project
         run: |
           set -o pipefail
@@ -75,9 +94,10 @@ jobs:
       - name: Package .app
         run: |
           set -o pipefail
-          ditto -c -k --sequesterRsrc --keepParent \
-            build/Build/Products/Debug/KRemote.app \
-            KRemote-debug.zip
+          APP="build/Build/Products/Debug/KRemote.app"
+          # Embed the RDP libraries so the artifact is runnable without Homebrew.
+          bash scripts/embed-freerdp.sh "$APP" -
+          ditto -c -k --sequesterRsrc --keepParent "$APP" KRemote-debug.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

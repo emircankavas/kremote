@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <mrng:Connections xmlns:mrng="http://mremoteng.org" Name="Connections" Export="false" EncryptionEngine="AES" BlockCipherMode="GCM" KdfIterations="1000" FullFileEncryption="false" Protected="lZLjEacWyIkkIdHZTf4OFsMyXDtgegkVpqU/wxoy5fLnvHRSZMbDLskev/O+iEf09ynfTQDDMLFyB2C3OUdlNv6r" ConfVersion="2.6">
-    <Node Name="Prod" Type="Container" Descr="" Icon="mRemoteNG" Panel="General" Id="654dd007-6c06-4db6-88c1-86e9c1b89078" Username="" Domain="" Password="" Hostname="" Protocol="RDP" PuttySession="Default Settings" Port="3389" >
+    <Node Name="Prod" Type="Container" Descr="" Icon="mRemoteNG" Panel="General" Id="654dd007-6c06-4db6-88c1-86e9c1b89078" Username="" Domain="CORP" Password="" Hostname="" Protocol="RDP" PuttySession="Default Settings" Port="3389" Resolution="FitToWindow" Colors="16bit" RedirectClipboard="true" RedirectDrives="false" >
         <Node Name="web01" Type="Connection" Descr="web frontend" Icon="mRemoteNG" Panel="General" Id="54c41dff-45a7-43cd-b177-b5fcffe9cfe3" Username="deploy" Domain="" Password="h09bB4AX+AT6QfbeEmd99+sfH6X+Gv8l7P4pxYDqhMti6BeN8fr5qd60NHyWnVABkLe0PVA=" Hostname="192.0.2.10" Protocol="SSH2" PuttySession="Default Settings" Port="22" />
         <Node Name="db01" Type="Connection" Descr="" Icon="mRemoteNG" Panel="General" Id="5cafa2a0-1020-4e36-a607-424417d7acdf" Username="postgres" Domain="" Password="dNBK0CuRhmRf6uw7Cags8L/RfrALnSrrVTf0oZf0EolkmG1mr81LIEN5J/mO6DCjY8rIpQ==" Hostname="192.0.2.11" Protocol="SSH2" PuttySession="Default Settings" Port="5432" />
     </Node>

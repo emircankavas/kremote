@@ -57,13 +57,16 @@ public enum ConfConsSerializer {
             ("Panel", "General"),
             ("Id", node.id.uuidString),
             ("Username", node.username),
-            ("Domain", ""),
+            ("Domain", node.rdp?.domain ?? ""),
             ("Password", passwordField),
             ("Hostname", node.host),
             ("Protocol", node.protocolName.isEmpty ? "SSH2" : node.protocolName),
             ("PuttySession", "Default Settings"),
             ("Port", String(node.port)),
         ]
+        // RDP appearance/redirection settings, so a round-trip through the file
+        // preserves what the importer read (only the ones actually set).
+        attributes += node.rdp?.confConsAttributes.filter { $0.0 != "Domain" } ?? []
         if node.isFolder { attributes.removeAll { $0.0 == "Password" } }
 
         let attrText = attributes.map { "\($0.0)=\"\(escape($0.1))\"" }.joined(separator: " ")
