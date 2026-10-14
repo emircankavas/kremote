@@ -589,6 +589,30 @@ void krdp_client_set_clipboard_files(krdp_client* client, const char* const* pat
 
 // MARK: - Graphics pipeline (rdpgfx)
 
+/// Rebuilds the GDI framebuffer at the size the server announced.
+///
+/// FreeRDP has no default implementation on the client side: the X11/SDL clients
+/// each provide their own and it is called from `gdi_ResetGraphics` (which the
+/// graphics pipeline sends on every connect and resize). Leaving it NULL crashes
+/// the moment GFX starts, on the frame the server resizes us — `WINPR_ASSERT`s
+/// are compiled out in release builds, so the call goes straight to address 0.
+static BOOL krdp_desktop_resize(rdpContext* context)
+{
+    if (!context || !context->gdi) return FALSE;
+    rdpGdi* gdi = context->gdi;
+    const rdpSettings* settings = context->settings;
+    if (!settings) return FALSE;
+
+    // Do not let a frame be painted from the buffer we are about to replace.
+    const BOOL suppress = gdi->suppressOutput;
+    gdi->suppressOutput = TRUE;
+    const BOOL ok = gdi_resize(gdi,
+                               freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth),
+                               freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight));
+    gdi->suppressOutput = suppress;
+    return ok;
+}
+
 /// Called by the GDI graphics pipeline once a surface has been drawn into the
 /// GDI framebuffer. This is the GFX equivalent of `EndPaint`: hand the finished
 /// buffer to Swift exactly like the legacy path does, so both pipelines feed the
@@ -729,6 +753,10 @@ static BOOL krdp_post_connect(freerdp* instance)
     // update is handed to Swift. BGRA32 matches what a CGImage wants.
     if (!gdi_init(instance, PIXEL_FORMAT_BGRA32)) return FALSE;
     context->update->EndPaint = krdp_end_paint;
+    // Required by the graphics pipeline: `gdi_ResetGraphics` calls this to
+    // rebuild the framebuffer at the size the server asks for, and there is no
+    // client-side default — leaving it NULL segfaults as soon as GFX starts.
+    context->update->DesktopResize = krdp_desktop_resize;
 
     return TRUE;
 }
