@@ -20,7 +20,11 @@ struct KRemoteApp: App {
                     updateAvailable = info
                 }
         }
-        .windowToolbarStyle(.unified(showsTitle: true))
+        // No system title bar: the app draws a single header row of its own
+        // (title + tabs + controls), so there is not a system bar *and* a header
+        // stacked, which is what pushed the title down a row. The traffic-light
+        // buttons float over that row, hence the header's leading inset.
+        .windowStyle(.hiddenTitleBar)
         .commands {
             // No "New" document semantics yet.
             CommandGroup(replacing: .newItem) {}

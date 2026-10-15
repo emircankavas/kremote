@@ -27,12 +27,6 @@ struct ContentView: View {
         // that pill and exposed the system toolbar's own customisation menu on
         // right-click — neither of which is wanted here.
         .navigationTitle("")
-        .toolbar {
-            // Only the session controls, on the right.
-            ToolbarItemGroup(placement: .primaryAction) {
-                SessionToolbarItems()
-            }
-        }
         .sheet(item: $model.editingNodeID) { id in
             ConnectionEditorView(nodeID: id) { model.editingNodeID = nil }
         }
@@ -93,18 +87,19 @@ extension UUID: @retroactive Identifiable {
     public var id: UUID { self }
 }
 
-/// The app title and the session tabs, on one row above the sessions.
+/// The app's single header row: title, session tabs, and the session controls.
 ///
-/// Drawn here rather than as toolbar items: on a `NavigationSplitView` a leading
-/// toolbar item belongs to the *sidebar* column's title bar, so the tabs ended up
-/// inside that area, and right-clicking one offered the system toolbar's own
-/// customisation menu ("Icon only", "Icon and text"). A plain row gives the
-/// intended layout with none of that.
+/// With `.windowStyle(.hiddenTitleBar)` there is no system bar, so this is the
+/// only row above the sessions — it must lay out the whole thing, including the
+/// inset that keeps it clear of the traffic-light buttons that float over its
+/// leading edge.
 struct WindowHeader: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
+            // Clears the traffic lights (they hover over this row).
+            Spacer().frame(width: 70)
             Text("KRemote")
                 .font(.headline)
                 .layoutPriority(1)
@@ -112,9 +107,10 @@ struct WindowHeader: View {
                 TabStrip()
             }
             Spacer(minLength: 0)
+            SessionToolbarItems()
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
         .background(.bar)
     }
 }
