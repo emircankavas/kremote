@@ -371,14 +371,18 @@ static UINT krdp_cliprdr_send_format_list(CliprdrClientContext* ctx, bool hasTex
         formats[count].formatName = NULL;
         count++;
     }
-    if (client && client->clipboard_file_count > 0) {
-        // Advertised by *name*: a server will not paste a file list offered only
-        // under a numeric id. It then asks for the list with a normal
-        // CB_FORMAT_DATA_REQUEST, which `krdp_cliprdr_server_format_data_request`
-        // answers, and pulls the bytes through the file context.
+    if (client && client->clipboard_file_count > 0 && client->cliprdr_file &&
+        (cliprdr_file_context_current_flags(client->cliprdr_file) & CB_STREAM_FILECLIP_ENABLED)) {
+        // Offer the file list by *name*, matching what the server advertised. The
+        // guard is the file-clip capability, not `has_local_support` — the latter
+        // is about pasting files *out* of the session and is FALSE without FUSE,
+        // which is not needed for Mac -> remote.
         formats[count].formatId = CF_HDROP;
         formats[count].formatName = (char*)krdp_file_descriptor_name;
         count++;
+        // Tell the helper a new client list is going out; without this its state
+        // for the previous list is never retired.
+        cliprdr_file_context_notify_new_client_format_list(client->cliprdr_file);
     }
 
     CLIPRDR_FORMAT_LIST list;
@@ -427,12 +431,33 @@ static UINT krdp_cliprdr_monitor_ready(CliprdrClientContext* ctx, const CLIPRDR_
 
 static UINT krdp_cliprdr_server_capabilities(CliprdrClientContext* ctx, const CLIPRDR_CAPABILITIES* caps)
 {
-    (void)ctx; (void)caps;
+    krdp_client* client = krdp_client_from_cliprdr(ctx);
+    if (!client || !client->cliprdr_file || !caps) return CHANNEL_RC_OK;
+
+    // Record what the *server* supports before we answer: `current_flags` and the
+    // file list's serialisation both read these, and until they are stored the
+    // helper reports no file capability at all.
+    for (UINT32 i = 0; i < caps->cCapabilitiesSets; i++) {
+        const CLIPRDR_CAPABILITY_SET* set = &caps->capabilitySets[i];
+        if (set->capabilitySetType == CB_CAPSTYPE_GENERAL &&
+            set->capabilitySetLength >= CB_CAPSTYPE_GENERAL_LEN) {
+            const CLIPRDR_GENERAL_CAPABILITY_SET* general =
+                (const CLIPRDR_GENERAL_CAPABILITY_SET*)set;
+            cliprdr_file_context_remote_set_flags(client->cliprdr_file, general->generalFlags);
+        }
+    }
     return CHANNEL_RC_OK;
 }
 
 static UINT krdp_cliprdr_server_format_list(CliprdrClientContext* ctx, const CLIPRDR_FORMAT_LIST* list)
 {
+    krdp_client* client = krdp_client_from_cliprdr(ctx);
+    // A new remote clipboard invalidates whatever file state the helper held for
+    // the previous one.
+    if (client && client->cliprdr_file) {
+        cliprdr_file_context_notify_new_server_format_list(client->cliprdr_file);
+    }
+
     CLIPRDR_FORMAT_LIST_RESPONSE response;
     memset(&response, 0, sizeof(response));
     response.common.msgType = CB_FORMAT_LIST_RESPONSE;
@@ -650,6 +675,11 @@ static void krdp_channel_connected(void* ctx, const ChannelConnectedEventArgs* e
         context->client->cliprdr_file = cliprdr_file_context_new(context->client);
         if (context->client->cliprdr_file) {
             cliprdr_file_context_init(context->client->cliprdr_file, cliprdr);
+            // Register the file format. Without this the helper's
+            // `current_flags` stays 0 and the file capability is never offered,
+            // so a file copy is silently a no-op. `has_local_support` (a FUSE
+            // question) does not apply to Mac -> remote, so this is set directly.
+            cliprdr_file_context_set_locally_available(context->client->cliprdr_file, TRUE);
         }
     } else if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0) {
         RdpgfxClientContext* gfx = (RdpgfxClientContext*)e->pInterface;
@@ -950,6 +980,23 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     // release connect but draw nothing, so the hook must stay paired with it.
     freerdp_settings_set_bool(s, FreeRDP_SupportGraphicsPipeline, TRUE);
     freerdp_settings_set_bool(s, FreeRDP_GfxH264, TRUE);
+    // RemoteFX / progressive codec. Without this the pipeline sends only plain
+    // bitmaps, which is most of why a real desktop felt slow while a client that
+    // enables it (mRemoteNXT, xfreerdp's defaults) feels fluid. Verified present
+    // in this build's libfreerdp3 (progressive_compress/decompress).
+    freerdp_settings_set_bool(s, FreeRDP_GfxProgressive, TRUE);
+    freerdp_settings_set_bool(s, FreeRDP_GfxProgressiveV2, TRUE);
+    // AVC444 gives a much better picture for the same bandwidth where the server
+    // supports it; harmless where it does not.
+    freerdp_settings_set_bool(s, FreeRDP_GfxAVC444, TRUE);
+    // The software GDI path is what the reference embedded clients use; leaving it
+    // off makes FreeRDP try to hand the surface to a GPU path that an embedder
+    // without one cannot complete.
+    freerdp_settings_set_bool(s, FreeRDP_SoftwareGdi, TRUE);
+    // Let the server adapt to the link (and to our ack cadence) instead of
+    // assuming a fixed high-bandwidth connection.
+    freerdp_settings_set_bool(s, FreeRDP_SupportDynamicChannels, TRUE);
+    freerdp_settings_set_bool(s, FreeRDP_DynamicResolutionUpdate, TRUE);
     freerdp_settings_set_bool(s, FreeRDP_IgnoreCertificate, client->ignore_certificate ? TRUE : FALSE);
     freerdp_settings_set_bool(s, FreeRDP_RedirectClipboard, client->redirect_clipboard ? TRUE : FALSE);
     freerdp_settings_set_bool(s, FreeRDP_RedirectDrives, client->redirect_drives ? TRUE : FALSE);
