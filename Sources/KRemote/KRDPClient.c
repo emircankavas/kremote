@@ -26,6 +26,7 @@
 #include <freerdp/update.h>
 #include <freerdp/gdi/gdi.h>
 #include <freerdp/addin.h>
+#include <freerdp/client.h>   /* freerdp_client_context_new, RDP_CLIENT_ENTRY_POINTS */
 #include <freerdp/channels/channels.h>
 #include <freerdp/client/channels.h>
 #include <freerdp/client/disp.h>
@@ -42,6 +43,7 @@
 #include <winpr/file.h>   /* FILE_ATTRIBUTE_* */
 
 #include <winpr/synch.h>
+#include <winpr/sysinfo.h>   /* winpr_GetTickCount64 */
 #include <winpr/thread.h>
 #include <winpr/ssl.h>
 #include <winpr/interlocked.h>
@@ -49,10 +51,13 @@
 // MARK: - Context
 
 /// FreeRDP requires the rdpContext to be the first member of a custom context.
-/// FreeRDP 3 dropped the old `rdpContext::custom` field, so the client pointer
-/// travels through the typed context instead (see `instances` below).
+/// With the client-common path this must be an **rdpClientContext**, not a bare
+/// rdpContext: `freerdp_client_context_new` asserts on it (`requireRdpClientContext`)
+/// and refuses to run against anything smaller. FreeRDP 3 dropped the old
+/// `rdpContext::custom` field, so the client pointer travels through the typed
+/// context instead.
 typedef struct {
-    rdpContext context;
+    rdpClientContext common;
     struct krdp_client* client;
     int width;
     int height;
@@ -63,6 +68,9 @@ typedef struct {
     /// what blits decoded surfaces into the GDI framebuffer, so our override has
     /// to call it first — replacing it outright is what leaves the screen blank.
     pcRdpgfxUpdateSurfaces gfx_base_update_surfaces;
+    /// The pipeline's own `SurfaceCommand`; wrapped only to count which codec the
+    /// server sent, then called through.
+    pcRdpgfxSurfaceCommand gfx_base_surface_command;
 } krdp_context;
 
 /// Looks up the typed context from any base context.
@@ -148,6 +156,49 @@ static void report_state(krdp_client* client, krdp_state state, const char* mess
 
 // MARK: - Frame delivery
 
+/// Frame counter for diagnosing smoothness. Writes an fps figure to
+/// `~/Library/Application Support/KRemote/perf.log` every few seconds, so a
+/// session's real throughput can be read without reproducing it elsewhere.
+/// Cheap: a counter increment on the frame path and a timestamped line every
+/// ~5s. Remove once frame pacing is settled.
+static volatile LONG g_frame_count = 0;
+static volatile LONG64 g_frame_window_start = 0;
+
+/// Counts the GFX codec each surface command carries, so the log can say what the
+/// server actually sent (uncompressed vs progressive vs H.264) rather than what
+/// was negotiated.
+static volatile LONG g_codec_counts[16] = {0};
+
+static void krdp_note_codec(UINT32 codecId)
+{
+    if (codecId < 16) InterlockedIncrement(&g_codec_counts[codecId]);
+}
+
+static void krdp_note_frame(void)
+{
+    InterlockedIncrement(&g_frame_count);
+    const LONG64 now = winpr_GetTickCount64();
+    LONG64 start = g_frame_window_start;
+    if (start == 0) { g_frame_window_start = now; return; }
+    const LONG64 elapsed = now - start;
+    if (elapsed < 5000) return;
+    const LONG count = InterlockedExchange(&g_frame_count, 0);
+    g_frame_window_start = now;
+
+    const char* home = getenv("HOME");
+    if (!home) return;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/Library/Application Support/KRemote/perf.log", home);
+    FILE* f = fopen(path, "a");
+    if (!f) return;
+    // Codec histogram alongside the rate: what the server actually sent.
+    fprintf(f, "%.1f fps (%ld frames / %lld ms) codecs[clear=%ld rfx=%ld avc420=%ld avc444=%ld]\n",
+            count * 1000.0 / (double)elapsed, (long)count, (long long)elapsed,
+            (long)g_codec_counts[0], (long)g_codec_counts[3],
+            (long)g_codec_counts[8], (long)g_codec_counts[9]);
+    fclose(f);
+}
+
 static BOOL krdp_end_paint(rdpContext* context)
 {
     krdp_context* ctx = krdp_ctx(context);
@@ -161,6 +212,7 @@ static BOOL krdp_end_paint(rdpContext* context)
     ctx->height = (int)gdi->height;
 
     if (client->on_frame) {
+        krdp_note_frame();
         client->on_frame(client->user,
                          gdi->primary_buffer,
                          (int)gdi->width,
@@ -617,6 +669,17 @@ static BOOL krdp_desktop_resize(rdpContext* context)
     return ok;
 }
 
+/// Wraps the pipeline's `SurfaceCommand` just to record the codec id, then runs it.
+static UINT krdp_gfx_SurfaceCommand(RdpgfxClientContext* context, const RDPGFX_SURFACE_COMMAND* cmd)
+{
+    rdpGdi* gdi = context ? (rdpGdi*)context->custom : NULL;
+    krdp_context* ctx = gdi ? krdp_ctx(gdi->context) : NULL;
+    if (!ctx) return CHANNEL_RC_OK;
+    if (cmd) krdp_note_codec(cmd->codecId);
+    if (ctx->gfx_base_surface_command) return ctx->gfx_base_surface_command(context, cmd);
+    return CHANNEL_RC_OK;
+}
+
 /// Called by the GDI graphics pipeline once a surface has been drawn into the
 /// GDI framebuffer.
 ///
@@ -683,10 +746,12 @@ static void krdp_channel_connected(void* ctx, const ChannelConnectedEventArgs* e
         // to the GDI. Its `UpdateSurfaces` is saved and the pipeline's callback
         // chained on top of it, so the surfaces are drawn first and then the
         // finished buffer is handed to Swift.
-        rdpGdi* gdi = context->context.gdi;
+        rdpGdi* gdi = context->common.context.gdi;
         if (gdi && gdi_graphics_pipeline_init(gdi, gfx)) {
             context->gfx_base_update_surfaces = gfx->UpdateSurfaces;
             gfx->UpdateSurfaces = krdp_gfx_UpdateSurfaces;
+            context->gfx_base_surface_command = gfx->SurfaceCommand;
+            gfx->SurfaceCommand = krdp_gfx_SurfaceCommand;
         }
     }
 }
@@ -700,43 +765,14 @@ static bool client_wants_clipboard(freerdp* instance)
     return ctx && ctx->client && ctx->client->redirect_clipboard;
 }
 
-static BOOL krdp_context_new(freerdp* instance, rdpContext* context)
-{
-    // The client is attached by `krdp_client_create` right after this returns;
-    // FreeRDP 3 has no `instance->custom` to carry it through here.
-    (void)instance;
-    (void)context;
-    return TRUE;
-}
-
-static void krdp_context_free(freerdp* instance, rdpContext* context)
-{
-    (void)instance;
-    (void)context;
-}
-
 static BOOL krdp_pre_connect(freerdp* instance)
 {
-    rdpContext* context = instance->context;
-    PubSub_SubscribeChannelConnected(context->pubSub, krdp_channel_connected);
-
-    // Ask for the channels we use by name. This runs before FreeRDP rebuilds the
-    // channel manager (`utils_reload_channels` calls `LoadChannels` afterwards),
-    // so what the settings list here is what actually gets created. The Clipboard
-    // virtual channel is what makes copy/paste work in either direction; Display
-    // Control drives resize.
-    // `add_*_channel` takes the addin lookup name ("disp"), not the DVC wire name
-    // ("Microsoft::Windows::RDS::DisplayControl") — passing the latter makes the
-    // loader fail and takes the whole post-connect down with it.
-    const char* display[] = { DISP_CHANNEL_NAME };
-    if (!freerdp_client_add_dynamic_channel(context->settings, 1, display)) return FALSE;
-    const char* gfx[] = { RDPGFX_CHANNEL_NAME };
-    if (!freerdp_client_add_dynamic_channel(context->settings, 1, gfx)) return FALSE;
-    const char* clipboard[] = { CLIPRDR_SVC_CHANNEL_NAME };
-    if (client_wants_clipboard(instance) &&
-        !freerdp_client_add_static_channel(context->settings, 1, clipboard)) {
-        return FALSE;
-    }
+    // Nothing to do: with the client-common context (`freerdp_client_context_new`)
+    // the channel manager is built from the settings flags, and
+    // `freerdp_channels_pre_connect` loads the addins. The reference embedded
+    // clients leave this empty for the same reason. (Adding the channels by hand
+    // here, as this bridge used to, also risked listing one twice.)
+    (void)instance;
     return TRUE;
 }
 
@@ -851,10 +887,24 @@ static DWORD WINAPI krdp_thread(LPVOID arg)
         // FreeRDP asking to disconnect (the server dropped us, or `disconnect`
         // was called); a transient error is tolerated rather than treated as
         // fatal, so a hiccup cannot kill a live session.
-        while (client->running) {
-            if (WaitForSingleObject(client->stop_event, 50) == WAIT_OBJECT_0) break;
-            if (freerdp_shall_disconnect_context(context)) break;
-            (void)freerdp_check_event_handles(context);
+        // Wait on FreeRDP's own event handles rather than polling on a fixed
+        // sleep: the socket becoming readable is the thing worth waking for, and
+        // a fixed 50 ms tick adds latency to every arriving batch. This is the
+        // loop the reference clients run.
+        while (client->running && !freerdp_shall_disconnect_context(context)) {
+            HANDLE handles[64];
+            const DWORD count = freerdp_get_event_handles(context, handles, 64);
+            if (count == 0) break;
+            HANDLE all[65];
+            DWORD n = 0;
+            for (DWORD i = 0; i < count; i++) all[n++] = handles[i];
+            // The stop event rides along so a stop is noticed immediately instead
+            // of after the timeout.
+            if (client->stop_event) all[n++] = client->stop_event;
+            const DWORD status = WaitForMultipleObjects(n, all, FALSE, 200);
+            if (status == WAIT_FAILED) break;
+            if (client->stop_event && status == WAIT_OBJECT_0 + (n - 1)) break;
+            if (!freerdp_check_event_handles(context)) break;
         }
     } else {
         UINT32 last = freerdp_get_last_error(context);
@@ -877,6 +927,36 @@ static DWORD WINAPI krdp_thread(LPVOID arg)
 bool krdp_is_available(void) { return true; }
 
 const char* krdp_freerdp_version(void) { return FREERDP_VERSION_FULL; }
+
+// MARK: - Client entry points
+
+/// The supported embedder path (`freerdp_client_context_new`) needs a callback
+/// set rather than the low-level `freerdp_new()` + `freerdp_context_new()` pair.
+/// The difference is not cosmetic: the framework's own context setup is what wires
+/// the channel manager (`LoadChannels`), the codec lists and the session
+/// teardown, so doing it by hand (as this bridge used to) left those to be
+/// re-implemented and subtly incomplete. This mirrors what the reference embedded
+/// clients do.
+static BOOL krdp_entry_new(freerdp* instance, rdpContext* context)
+{
+    instance->PreConnect = krdp_pre_connect;
+    instance->PostConnect = krdp_post_connect;
+    instance->PostDisconnect = krdp_post_disconnect;
+    // Ask for credentials instead of failing silently when none are stored or the
+    // stored ones are rejected; the UI answers via krdp_client_supply_credentials.
+    instance->AuthenticateEx = krdp_authenticate_ex;
+    PubSub_SubscribeChannelConnected(context->pubSub, krdp_channel_connected);
+    return TRUE;
+}
+
+static BOOL krdp_entry_global_init(void) { return TRUE; }
+static void krdp_entry_global_uninit(void) {}
+
+/// The framework does not drive the session itself; the bridge's own thread does
+/// (see `krdp_client_start`), so these are inert.
+static int krdp_entry_client_start(rdpContext* context) { (void)context; return 0; }
+static int krdp_entry_client_stop(rdpContext* context) { (void)context; return 0; }
+static void krdp_entry_free(freerdp* instance, rdpContext* context) { (void)instance; (void)context; }
 
 krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
                                 krdp_frame_cb on_frame,
@@ -933,32 +1013,28 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     client->on_clipboard = on_clipboard;
     client->user = user;
 
-    client->instance = freerdp_new();
-    if (!client->instance) { krdp_client_destroy(client); return NULL; }
+    client->instance = NULL;
+    RDP_CLIENT_ENTRY_POINTS entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.Size = sizeof(entry);
+    entry.Version = RDP_CLIENT_INTERFACE_VERSION;
+    entry.ContextSize = sizeof(krdp_context);
+    entry.GlobalInit = krdp_entry_global_init;
+    entry.GlobalUninit = krdp_entry_global_uninit;
+    entry.ClientNew = krdp_entry_new;
+    entry.ClientFree = krdp_entry_free;
+    entry.ClientStart = krdp_entry_client_start;
+    entry.ClientStop = krdp_entry_client_stop;
 
-    client->instance->ContextSize = sizeof(krdp_context);
-    client->instance->ContextNew = krdp_context_new;
-    client->instance->ContextFree = krdp_context_free;
-    client->instance->PreConnect = krdp_pre_connect;
-    client->instance->PostConnect = krdp_post_connect;
-    client->instance->PostDisconnect = krdp_post_disconnect;
-    // Ask for credentials instead of failing silently when none are stored or the
-    // stored ones are rejected; the UI answers through krdp_client_supply_credentials.
-    client->instance->AuthenticateEx = krdp_authenticate_ex;
-    // FreeRDP rebuilds the channel manager *after* PreConnect and populates it
-    // through this callback, so it must be set or no channel ever goes live.
-    // (`freerdp_context_new` leaves it NULL, unlike `freerdp_client_context_new`.)
-    client->instance->LoadChannels = freerdp_client_load_channels;
-    client->credentials_event = CreateEvent(NULL, TRUE, FALSE, NULL);
-    if (!client->credentials_event) { krdp_client_destroy(client); return NULL; }
-
-    if (!freerdp_context_new(client->instance)) {
-        krdp_client_destroy(client);
-        return NULL;
-    }
+    rdpContext* context = freerdp_client_context_new(&entry);
+    if (!context) { krdp_client_destroy(client); return NULL; }
+    client->instance = context->instance;
     // Bind the client into its own context: FreeRDP 3 has no shared `custom`
     // field, so this typed slot is how the callbacks find their way back.
-    krdp_ctx(client->instance->context)->client = client;
+    krdp_ctx(context)->client = client;
+
+    client->credentials_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!client->credentials_event) { krdp_client_destroy(client); return NULL; }
 
     rdpSettings* s = client->instance->context->settings;
 
@@ -1000,6 +1076,17 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     // AVC444 gives a much better picture for the same bandwidth where the server
     // supports it; harmless where it does not.
     freerdp_settings_set_bool(s, FreeRDP_GfxAVC444, TRUE);
+    freerdp_settings_set_bool(s, FreeRDP_GfxAVC444v2, TRUE);
+    // The monitor scale factors must be one of 100/140/180 on the wire, set in
+    // *both* slots: FreeRDP 3.27.x reads them crossed when it builds the monitor
+    // definition, and an out-of-range value makes the client core data invalid.
+    freerdp_settings_set_uint32(s, FreeRDP_DesktopScaleFactor, 100);
+    freerdp_settings_set_uint32(s, FreeRDP_DeviceScaleFactor, 100);
+    // TCP keepalive: FreeRDP's defaults (5 s idle, 3 probes 2 s apart) are far
+    // too tight for an interactive session and get dropped by stateful firewalls.
+    freerdp_settings_set_uint32(s, FreeRDP_TcpKeepAliveDelay, 60);
+    freerdp_settings_set_uint32(s, FreeRDP_TcpKeepAliveInterval, 15);
+    freerdp_settings_set_uint32(s, FreeRDP_TcpKeepAliveRetries, 4);
     // The software GDI path is what the reference embedded clients use; leaving it
     // off makes FreeRDP try to hand the surface to a GPU path that an embedder
     // without one cannot complete.
