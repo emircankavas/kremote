@@ -1,4 +1,4 @@
-## KRemote v1.7.8
+## KRemote v1.7.9
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -6,22 +6,29 @@ connection tree with folder credential inheritance and mRemoteNG
 
 ### Fixes
 
-**The RDP desktop now matches the pane on the first connection (smart size).**
-The previous release made the bridge replay a size request once the Display
-Control channel came up, but the request itself was still being lost: the panel
-is created before SwiftUI has laid it out, so the connection starts at the
-1280×800 fallback, and the view's own `layout()` runs while the session object is
-still nil and is not triggered again until the window is resized by hand. The
-pane now sends its real size once the layout pass has settled, so the desktop
-takes the panel's size from the start. Verified against a live host with a
-standalone probe: 1280×720 → 1600×900 arrives as 1600×900.
+**Smart size now really does apply on the first connection.** Verified against a
+live host: connecting at 1280×800 with the pane's 2400×1400 requested immediately
+afterwards now yields 2400×1400 frames.
 
-### Changes
+The Display Control resize was being sent, and accepted by the API, but the
+server simply had not applied it — it honours a monitor layout only once the
+session has settled, and it gives no acknowledgement. A single request (and even
+one with a fixed delay behind it) therefore did nothing. The bridge now uses the
+frame size as the signal: while a newer size is pending and frames keep arriving
+at the old one, it re-sends the request, at most four times a second and for a
+bounded number of attempts, so a server that refuses a size is not spammed.
 
-**Tabs are now to the *right* of the app title**, as asked — the title is drawn as
-the leading toolbar item and the tab strip follows it immediately.
+### Also in this release
 
-All of v1.7.7 back to v1.6.0 is included.
+**The tab strip no longer sits in the sidebar's title area.** A leading toolbar
+item on a `NavigationSplitView` belongs to the *sidebar column*, so the tabs were
+drawn inside that region and right-clicking one offered the system toolbar's own
+customisation menu ("Icon only", "Icon and text"). The title and tabs are now a
+plain row above the sessions, in the detail area: "KRemote" on the left with the
+tabs immediately to its right, and no system menu.
+
+All of v1.7.8 back to v1.6.0 is included.
+
 
 
 

@@ -15,25 +15,20 @@ struct ContentView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 280, max: 460)
         } detail: {
-            DetailView()
+            VStack(spacing: 0) {
+                WindowHeader()
+                Divider()
+                DetailView()
+            }
         }
-        // The window title is drawn by the first toolbar item instead of by
-        // `navigationTitle`, so the tab strip can sit immediately to its right:
-        // `.navigation` (leading run) places items *before* the title and
-        // `.principal` centres them, neither of which is "just after the title".
+        // The window title is drawn by `WindowHeader` inside the detail area, not
+        // by the system toolbar. A `.navigation` item on a NavigationSplitView
+        // lands in the *sidebar column's* title area, which put the tabs inside
+        // that pill and exposed the system toolbar's own customisation menu on
+        // right-click — neither of which is wanted here.
         .navigationTitle("")
         .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Text("KRemote")
-                    .font(.headline)
-                    .padding(.trailing, 4)
-            }
-            ToolbarItem(placement: .navigation) {
-                if !model.sessions.isEmpty {
-                    TabStrip()
-                }
-            }
-            // The session controls stay on the right.
+            // Only the session controls, on the right.
             ToolbarItemGroup(placement: .primaryAction) {
                 SessionToolbarItems()
             }
@@ -96,6 +91,32 @@ struct ContentView: View {
 /// Lets `sheet(item:)` accept a plain `UUID` node id.
 extension UUID: @retroactive Identifiable {
     public var id: UUID { self }
+}
+
+/// The app title and the session tabs, on one row above the sessions.
+///
+/// Drawn here rather than as toolbar items: on a `NavigationSplitView` a leading
+/// toolbar item belongs to the *sidebar* column's title bar, so the tabs ended up
+/// inside that area, and right-clicking one offered the system toolbar's own
+/// customisation menu ("Icon only", "Icon and text"). A plain row gives the
+/// intended layout with none of that.
+struct WindowHeader: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("KRemote")
+                .font(.headline)
+                .layoutPriority(1)
+            if !model.sessions.isEmpty {
+                TabStrip()
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.bar)
+    }
 }
 
 /// The `#` (become root) and split-view controls, shown in the window title bar.

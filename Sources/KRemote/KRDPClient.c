@@ -188,6 +188,10 @@ struct krdp_client {
     /// before then would be dropped; the channel-connected handler replays it.
     int pending_resize_width;
     int pending_resize_height;
+    /// When the last retry went out, and how many have, so the frame hook can
+    /// re-ask for a size the server has not applied yet without hammering it.
+    uint64_t last_resize_attempt;
+    int resize_attempts;
 };
 
 static bool g_ssl_initialised = false;
@@ -210,6 +214,10 @@ static void report_state(krdp_client* client, krdp_state state, const char* mess
 }
 
 // MARK: - Frame delivery
+
+/// Sends a Display Control monitor layout; defined with the public API, forward
+/// declared here because the frame hook re-asks a size the server has not applied.
+static bool krdp_send_monitor_layout(krdp_client* client, int width, int height);
 
 /// Frame counter for diagnosing smoothness. Writes an fps figure to
 /// `~/Library/Application Support/KRemote/perf.log` every few seconds, so a
@@ -265,6 +273,24 @@ static BOOL krdp_end_paint(rdpContext* context)
     client->height = (int)gdi->height;
     ctx->width = (int)gdi->width;
     ctx->height = (int)gdi->height;
+
+    // If the server is still painting at the size we asked to leave, our resize
+    // has not taken effect yet. The Display Control request is accepted only once
+    // the session has settled, and the server gives no explicit ack, so the frame
+    // size itself is the signal: while a newer size is pending and frames keep
+    // arriving at the old one, re-send it (rate-limited, and only for a while, so
+    // a server that refuses the size is not spammed).
+    if (client->pending_resize_width > 0 && client->pending_resize_height > 0 &&
+        ((int)gdi->width != client->pending_resize_width ||
+         (int)gdi->height != client->pending_resize_height)) {
+        const uint64_t now = winpr_GetTickCount64();
+        if (now - client->last_resize_attempt >= 250 && client->resize_attempts < 24) {
+            client->last_resize_attempt = now;
+            client->resize_attempts++;
+            krdp_send_monitor_layout(client, client->pending_resize_width,
+                                     client->pending_resize_height);
+        }
+    }
 
     if (client->on_frame) {
         krdp_note_frame();
@@ -1642,20 +1668,15 @@ void krdp_client_destroy(krdp_client* client)
     free(client);
 }
 
-void krdp_client_resize(krdp_client* client, int width, int height)
+/// Sends a Display Control monitor layout. Returns false when the channel is not
+/// up yet (the size is then only remembered, to be replayed).
+static bool krdp_send_monitor_layout(krdp_client* client, int width, int height)
 {
-    if (!client || width <= 0 || height <= 0) return;
-    // Remember it even when the channel is not up yet: the pane's first layout
-    // happens before the session connects, and the channel-connected handler
-    // replays this once Display Control exists. Without that the first
-    // connection stays at the size it was made with until a later resize.
-    client->pending_resize_width = width;
-    client->pending_resize_height = height;
-
-    if (!client->instance) return;
+    if (!client || !client->instance) return false;
     rdpContext* context = client->instance->context;
     krdp_context* ctx = (krdp_context*)context;
-    if (!context || !ctx->disp) return;
+    if (!context || !ctx->disp) return false;
+    if (!ctx->disp->SendMonitorLayout) return false;
 
     DISPLAY_CONTROL_MONITOR_LAYOUT layout;
     memset(&layout, 0, sizeof(layout));
@@ -1669,8 +1690,23 @@ void krdp_client_resize(krdp_client* client, int width, int height)
     layout.Orientation = 0;
     layout.DesktopScaleFactor = 100;
     layout.DeviceScaleFactor = 100;
+    return ctx->disp->SendMonitorLayout(ctx->disp, 1, &layout) == CHANNEL_RC_OK;
+}
 
-    ctx->disp->SendMonitorLayout(ctx->disp, 1, &layout);
+void krdp_client_resize(krdp_client* client, int width, int height)
+{
+    if (!client || width <= 0 || height <= 0) return;
+    if (width == client->pending_resize_width && height == client->pending_resize_height) return;
+    // Remember it even when the channel is not up yet: the pane's first layout
+    // happens before the session connects, and the channel-connected handler
+    // replays this once Display Control exists.
+    client->pending_resize_width = width;
+    client->pending_resize_height = height;
+    // A new target restarts the retry budget, so a deliberate resize is not
+    // suppressed by attempts spent on a previous one.
+    client->resize_attempts = 0;
+    client->last_resize_attempt = 0;
+    krdp_send_monitor_layout(client, width, height);
 }
 
 void krdp_client_mouse(krdp_client* client, int x, int y, int button, bool is_down)
