@@ -76,7 +76,7 @@ struct SidebarView: View {
             } else {
                 List(selection: $model.selectedNodeID) {
                     ForEach(results) { node in
-                        NodeRow(node: node, effective: model.effective(node.id), showsPath: true)
+                        NodeRow(node: node, showsPath: true)
                             .tag(node.id)
                             .contextMenu { menu(for: node) }
                     }
@@ -86,7 +86,7 @@ struct SidebarView: View {
         } else {
             List(selection: $model.selectedNodeID) {
                 OutlineGroup(model.roots, children: \.childNodes) { node in
-                    NodeRow(node: node, effective: model.effective(node.id))
+                    NodeRow(node: node)
                         .tag(node.id)
                         .contextMenu { menu(for: node) }
                         .draggable(node.id.uuidString) {
@@ -160,10 +160,20 @@ struct SidebarView: View {
 private struct NodeRow: View {
     @Environment(AppModel.self) private var model
     let node: ConnectionNode
-    let effective: EffectiveConnection?
     var showsPath: Bool = false
 
     var body: some View {
+        // Resolve the effective settings *inside* the body rather than taking
+        // them as an input. `ConnectionNode` is a reference type, so editing a
+        // node mutates it in place: no observable property of `AppModel`
+        // changes except `roots`, which `persist()` reassigns. Reading
+        // `model.roots` (through `effective(_:)`) here is what subscribes this
+        // row to that reassignment, so the subtitle refreshes as soon as an
+        // edit is saved. With the value captured as a parameter the row read no
+        // observable state, SwiftUI reused it, and the subtitle stayed stale
+        // until the next launch.
+        let effective = model.effective(node.id)
+
         HStack(spacing: 6) {
             Image(systemName: node.isFolder ? "folder" : "terminal")
                 .foregroundStyle(node.isFolder ? Color.accentColor : .secondary)
@@ -171,7 +181,7 @@ private struct NodeRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(node.name)
                     .lineLimit(1)
-                if !node.isFolder, let subtitle = subtitleText {
+                if !node.isFolder, let subtitle = subtitleText(effective) {
                     Text(subtitle)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
@@ -185,7 +195,7 @@ private struct NodeRow: View {
 
     /// On search results the folder path is shown first (so a deep host is
     /// locatable); otherwise just the resolved connection summary.
-    private var subtitleText: String? {
+    private func subtitleText(_ effective: EffectiveConnection?) -> String? {
         let connection = effective?.summary
         if showsPath, let path = pathText {
             if let connection, connection != "not configured" { return "\(path) · \(connection)" }

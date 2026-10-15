@@ -16,7 +16,11 @@ struct ConnectionEditorView: View {
     let onClose: () -> Void
 
     @State private var draft = ConnectionDraft(id: UUID(), name: "")
-    @State private var loaded = false
+    /// The node the draft was loaded from. Using the id (rather than a plain
+    /// "loaded" flag) means the draft is reloaded whenever the editor is pointed
+    /// at a different node — SwiftUI can reuse a sheet's content view, and a bare
+    /// flag would then leave the previous node's data in the fields.
+    @State private var loadedNodeID: ConnectionNode.ID?
 
     private var node: ConnectionNode? { model.find(nodeID) }
     private var isFolder: Bool { node?.isFolder ?? false }
@@ -251,12 +255,12 @@ struct ConnectionEditorView: View {
     // MARK: - Actions
 
     private func loadDraft() {
-        guard !loaded, let node else { return }
+        guard loadedNodeID != nodeID, let node else { return }
         // The stored password is loaded lazily, so pull this node's (and its
         // folders') out of the store now that the editor is opening.
         model.hydrateCredentials(for: nodeID)
         draft = ConnectionDraft(from: node)
-        loaded = true
+        loadedNodeID = nodeID
     }
 
     private func save() {
