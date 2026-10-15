@@ -182,6 +182,12 @@ struct krdp_client {
     HANDLE thread;
     HANDLE stop_event;
     volatile LONG running;
+
+    /// The most recent desktop size the pane asked for. Kept because the Display
+    /// Control channel is not up when the pane first lays out, and a resize sent
+    /// before then would be dropped; the channel-connected handler replays it.
+    int pending_resize_width;
+    int pending_resize_height;
 };
 
 static bool g_ssl_initialised = false;
@@ -1115,6 +1121,16 @@ static void krdp_channel_connected(void* ctx, const ChannelConnectedEventArgs* e
 
     if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0) {
         context->disp = (DispClientContext*)e->pInterface;
+        // Re-apply the requested size now that the channel is up.
+        //
+        // The pane lays out and calls `krdp_client_resize` before this channel
+        // exists, and with no `disp` that call is a no-op — so the session would
+        // stay at the size it connected with until the window happened to be
+        // resized again. Flushing the last request here is what makes "smart
+        // size" take effect on the first connection.
+        if (client->pending_resize_width > 0 && client->pending_resize_height > 0) {
+            krdp_client_resize(client, client->pending_resize_width, client->pending_resize_height);
+        }
     } else if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
         CliprdrClientContext* cliprdr = (CliprdrClientContext*)e->pInterface;
         context->cliprdr = cliprdr;
@@ -1628,10 +1644,18 @@ void krdp_client_destroy(krdp_client* client)
 
 void krdp_client_resize(krdp_client* client, int width, int height)
 {
-    if (!client || !client->instance) return;
+    if (!client || width <= 0 || height <= 0) return;
+    // Remember it even when the channel is not up yet: the pane's first layout
+    // happens before the session connects, and the channel-connected handler
+    // replays this once Display Control exists. Without that the first
+    // connection stays at the size it was made with until a later resize.
+    client->pending_resize_width = width;
+    client->pending_resize_height = height;
+
+    if (!client->instance) return;
     rdpContext* context = client->instance->context;
     krdp_context* ctx = (krdp_context*)context;
-    if (!context || !ctx->disp || width <= 0 || height <= 0) return;
+    if (!context || !ctx->disp) return;
 
     DISPLAY_CONTROL_MONITOR_LAYOUT layout;
     memset(&layout, 0, sizeof(layout));

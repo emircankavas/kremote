@@ -36,7 +36,11 @@ struct TabStrip: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 2) {
                 ForEach(model.sessions) { session in
-                    TabButton(session: session, isActive: session.id == model.activeSessionID) {
+                    TabButton(
+                        session: session,
+                        label: model.tabLabel(for: session.id),
+                        isActive: session.id == model.activeSessionID
+                    ) {
                         model.activateTab(session.id)
                     } onClose: {
                         model.closeSession(session.id)
@@ -51,6 +55,9 @@ struct TabStrip: View {
 
 private struct TabButton: View {
     let session: Session
+    /// The label to show: the connection's name, with a trailing number when the
+    /// same connection is open more than once.
+    let label: String
     let isActive: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
@@ -61,7 +68,7 @@ private struct TabButton: View {
         HStack(spacing: 5) {
             Image(systemName: "terminal")
                 .font(.caption2)
-            Text(session.displayTitle)
+            Text(label)
                 .font(.caption)
                 .lineLimit(1)
                 .truncationMode(.middle)

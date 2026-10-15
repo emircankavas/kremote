@@ -485,6 +485,19 @@ final class AppModel {
         sessions.first { $0.id == id }?.generation
     }
 
+    /// The label a tab shows: the connection's name, and — only when the same
+    /// connection is open more than once — a trailing "1", "2", … so two tabs to
+    /// the same host can be told apart. A lone tab keeps a clean name.
+    func tabLabel(for id: Session.ID) -> String {
+        guard let session = sessions.first(where: { $0.id == id }) else { return "" }
+        let sameConnection = sessions.filter { $0.nodeID == session.nodeID }
+        guard sameConnection.count > 1,
+              let index = sameConnection.firstIndex(where: { $0.id == id }) else {
+            return session.title
+        }
+        return "\(session.title) \(index + 1)"
+    }
+
     /// Applies a title pushed by the remote shell (OSC 0/2).
     func updateTitle(_ id: Session.ID, title: String) {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
