@@ -711,6 +711,12 @@ static void krdp_channel_connected(void* ctx, const ChannelConnectedEventArgs* e
 {
     krdp_context* context = krdp_ctx(ctx);
     if (!context || !e || !e->name) return;
+    // A channel can connect before the client pointer has been bound (the event
+    // fires during `freerdp_connect`, and the binding happens in create). Bail
+    // rather than dereference a null client — that is a write to a small offset
+    // off address 0.
+    krdp_client* client = context->client;
+    if (!client) return;
 
     if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0) {
         context->disp = (DispClientContext*)e->pInterface;
@@ -728,14 +734,14 @@ static void krdp_channel_connected(void* ctx, const ChannelConnectedEventArgs* e
         // an earlier build did) leaves CB_LOCK_CLIPDATA unanswered and the server
         // waiting, so a file paste never completes. Our client is handed in as
         // the context and read back through `krdp_client_from_cliprdr`.
-        context->client->cliprdr_file = cliprdr_file_context_new(context->client);
-        if (context->client->cliprdr_file) {
-            cliprdr_file_context_init(context->client->cliprdr_file, cliprdr);
+        client->cliprdr_file = cliprdr_file_context_new(client);
+        if (client->cliprdr_file) {
+            cliprdr_file_context_init(client->cliprdr_file, cliprdr);
             // Register the file format. Without this the helper's
             // `current_flags` stays 0 and the file capability is never offered,
             // so a file copy is silently a no-op. `has_local_support` (a FUSE
             // question) does not apply to Mac -> remote, so this is set directly.
-            cliprdr_file_context_set_locally_available(context->client->cliprdr_file, TRUE);
+            cliprdr_file_context_set_locally_available(client->cliprdr_file, TRUE);
         }
     } else if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0) {
         RdpgfxClientContext* gfx = (RdpgfxClientContext*)e->pInterface;
@@ -930,6 +936,15 @@ const char* krdp_freerdp_version(void) { return FREERDP_VERSION_FULL; }
 
 // MARK: - Client entry points
 
+/// The client being built by `krdp_client_create`, handed to `krdp_entry_new`.
+///
+/// `freerdp_client_context_new` runs `ClientNew` synchronously, before the create
+/// call can bind the client into the returned context — and a channel event can
+/// fire before that binding, leaving `context->client` null (a crash, or silently
+/// skipped channel wiring). Setting this just before the call lets `ClientNew`
+/// bind it immediately, so the context is never observably unbound.
+static krdp_client* g_pending_client = NULL;
+
 /// The supported embedder path (`freerdp_client_context_new`) needs a callback
 /// set rather than the low-level `freerdp_new()` + `freerdp_context_new()` pair.
 /// The difference is not cosmetic: the framework's own context setup is what wires
@@ -939,6 +954,9 @@ const char* krdp_freerdp_version(void) { return FREERDP_VERSION_FULL; }
 /// clients do.
 static BOOL krdp_entry_new(freerdp* instance, rdpContext* context)
 {
+    // Bind the client now: `freerdp_client_context_new` runs this before it
+    // returns, so this is the earliest point a channel event could need it.
+    if (g_pending_client) krdp_ctx(context)->client = g_pending_client;
     instance->PreConnect = krdp_pre_connect;
     instance->PostConnect = krdp_post_connect;
     instance->PostDisconnect = krdp_post_disconnect;
@@ -1026,12 +1044,13 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     entry.ClientStart = krdp_entry_client_start;
     entry.ClientStop = krdp_entry_client_stop;
 
+    g_pending_client = client;
     rdpContext* context = freerdp_client_context_new(&entry);
+    g_pending_client = NULL;
     if (!context) { krdp_client_destroy(client); return NULL; }
     client->instance = context->instance;
-    // Bind the client into its own context: FreeRDP 3 has no shared `custom`
-    // field, so this typed slot is how the callbacks find their way back.
-    krdp_ctx(context)->client = client;
+    // Usually already set by `krdp_entry_new`; this is the belt-and-braces path.
+    if (!krdp_ctx(context)->client) krdp_ctx(context)->client = client;
 
     client->credentials_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!client->credentials_event) { krdp_client_destroy(client); return NULL; }
