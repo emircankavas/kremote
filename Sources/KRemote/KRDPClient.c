@@ -405,52 +405,106 @@ static void krdp_clear_transfer(krdp_client* client, bool remove_files)
     client->transfer_dir = NULL;
 }
 
-/// Strips a server-supplied path down to one safe component.
+/// Converts a server-supplied relative path into a safe relative path.
 ///
-/// The name comes from the remote side, so it is untrusted: a `..`, an absolute
-/// path or a `/` must never be able to steer the write outside the transfer
-/// directory (a path-traversal guard, not a nicety). Windows separators are
-/// folded to `/`, the last component is taken, and anything still dangerous is
-/// replaced.
-static char* krdp_sanitise_name(const uint16_t* utf16_name)
+/// The name comes from the remote side, so it is untrusted: `..`, a leading `/`
+/// or a drive letter must never be able to steer the write outside the transfer
+/// directory (a path-traversal guard, not a nicety). The server sends the whole
+/// copied tree as a flat list whose entries are relative paths
+/// (`folder\\sub\\file.txt`), so the separators carry the structure and have to
+/// be kept — every *component* is cleaned individually, and `.`/`..`/empty
+/// components are dropped outright. Returns NULL when nothing survives.
+static char* krdp_sanitise_relative_path(const uint16_t* utf16_name)
 {
     if (!utf16_name) return NULL;
-    char* raw = krdp_utf16le_to_utf8((const BYTE*)utf16_name, 0);
-    // `krdp_utf16le_to_utf8` with length 0 expects a terminated string; rebuild
-    // explicitly instead, so an over-long name cannot read past the descriptor.
-    free(raw);
-    char buffer[512];
+
+    // Longest input is 259 UTF-16 units; UTF-8 can be 4 bytes each, plus
+    // separators, and one NUL.
+    char out[260 * 4 + 2];
     size_t o = 0;
-    for (size_t i = 0; i < 259 && utf16_name[i] && o + 4 < sizeof(buffer); i++) {
+    bool last_was_separator = true;   // also drops any leading separator
+
+    for (size_t i = 0; i < 259 && utf16_name[i]; i++) {
         uint32_t cp = utf16_name[i];
-        if (cp >= 0xD800 && cp <= 0xDBFF && utf16_name[i + 1] >= 0xDC00 && utf16_name[i + 1] <= 0xDFFF) {
+        if (cp >= 0xD800 && cp <= 0xDBFF && utf16_name[i + 1] >= 0xDC00 &&
+            utf16_name[i + 1] <= 0xDFFF) {
             cp = 0x10000 + ((cp - 0xD800) << 10) + (utf16_name[i + 1] - 0xDC00);
             i++;
         }
-        if (cp == '\\') cp = '/';
-        // A separator cannot appear in a single-component name, and control
-        // characters would corrupt the path.
-        if (cp == '/' || cp < 0x20) cp = '_';
-        if (cp < 0x80) {
-            buffer[o++] = (char)cp;
-        } else if (cp < 0x800) {
-            buffer[o++] = (char)(0xC0 | (cp >> 6));
-            buffer[o++] = (char)(0x80 | (cp & 0x3F));
-        } else if (cp < 0x10000) {
-            buffer[o++] = (char)(0xE0 | (cp >> 12));
-            buffer[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-            buffer[o++] = (char)(0x80 | (cp & 0x3F));
-        } else {
-            buffer[o++] = (char)(0xF0 | (cp >> 18));
-            buffer[o++] = (char)(0x80 | ((cp >> 12) & 0x3F));
-            buffer[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-            buffer[o++] = (char)(0x80 | (cp & 0x3F));
+        // Both separators collapse to one, so `a\\b`, `a/b` and `a//b` agree.
+        if (cp == '\\' || cp == '/') {
+            if (!last_was_separator) {
+                out[o++] = '/';
+                last_was_separator = true;
+            }
+            continue;
         }
+        // A control character would corrupt the path; drop it rather than
+        // letting it through as part of a component.
+        if (cp < 0x20) continue;
+        if (o + 4 >= sizeof(out)) break;
+        if (cp < 0x80) {
+            out[o++] = (char)cp;
+        } else if (cp < 0x800) {
+            out[o++] = (char)(0xC0 | (cp >> 6));
+            out[o++] = (char)(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out[o++] = (char)(0xE0 | (cp >> 12));
+            out[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            out[o++] = (char)(0x80 | (cp & 0x3F));
+        } else {
+            out[o++] = (char)(0xF0 | (cp >> 18));
+            out[o++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+            out[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            out[o++] = (char)(0x80 | (cp & 0x3F));
+        }
+        last_was_separator = false;
     }
-    buffer[o] = '\0';
-    if (o == 0) return NULL;
-    if (strcmp(buffer, ".") == 0 || strcmp(buffer, "..") == 0) return NULL;
-    return krdp_strdup(buffer);
+    out[o] = '\0';
+
+    // Walk the components and drop any that would escape or are meaningless.
+    // `..` is removed rather than kept-safely: a legitimate copy never contains
+    // one, and a malicious descriptor must not be able to climb out.
+    char cleaned[sizeof(out)];
+    size_t c = 0;
+    const char* segment = out;
+    while (*segment) {
+        const char* slash = strchr(segment, '/');
+        const size_t length = slash ? (size_t)(slash - segment) : strlen(segment);
+        if (length > 0 && !(length == 1 && segment[0] == '.') &&
+            !(length == 2 && segment[0] == '.' && segment[1] == '.')) {
+            if (c > 0) cleaned[c++] = '/';
+            memcpy(cleaned + c, segment, length);
+            c += length;
+        }
+        if (!slash) break;
+        segment = slash + 1;
+    }
+    cleaned[c] = '\0';
+    if (c == 0) return NULL;
+    return krdp_strdup(cleaned);
+}
+
+/// Creates every directory component of `path` (like `mkdir -p`).
+///
+/// Only ever called with a path built from the sanitised transfer entry, so the
+/// directory stays inside the transfer root. Returns true when the final
+/// directory exists afterwards.
+static bool krdp_make_parents(const char* path)
+{
+    char buffer[PATH_MAX];
+    const size_t length = strlen(path);
+    if (length == 0 || length >= sizeof(buffer)) return false;
+    memcpy(buffer, path, length + 1);
+    // Walk forward, creating each prefix. A partial failure (EEXIST) is fine.
+    for (char* p = buffer + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (mkdir(buffer, 0700) != 0 && errno != EEXIST) { /* keep going */ }
+        *p = '/';
+    }
+    if (mkdir(buffer, 0700) != 0 && errno != EEXIST) return false;
+    return true;
 }
 
 /// Parses the server's `FileGroupDescriptorW` payload into transfer entries and
@@ -489,7 +543,10 @@ static void krdp_begin_transfer(krdp_client* client, CliprdrClientContext* clipr
     for (UINT32 i = 0; i < count; i++) {
         const FILEDESCRIPTORW* d = &descriptors[i];
         krdp_transfer_file* f = &client->transfer_files[i];
-        f->name = krdp_sanitise_name(d->cFileName);
+        // The name is a path relative to what was copied (`folder\sub\a.txt`);
+        // the separators carry the tree, so they are kept, but every component
+        // is sanitised so nothing can climb out of the root.
+        f->name = krdp_sanitise_relative_path(d->cFileName);
         f->is_directory = (d->dwFlags & FD_ATTRIBUTES) && (d->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
         f->size = (d->dwFlags & FD_FILESIZE)
                       ? (int64_t)(((uint64_t)d->nFileSizeHigh << 32) | d->nFileSizeLow)
@@ -498,6 +555,15 @@ static void krdp_begin_transfer(krdp_client* client, CliprdrClientContext* clipr
         char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s", root, f->name);
         f->local_path = krdp_strdup(path);
+        // The parent directories of a nested entry may not have arrived yet as
+        // their own descriptor (a server is free to send them in any order), so
+        // create them here rather than relying on order.
+        char* last_slash = strrchr(f->local_path, '/');
+        if (last_slash && last_slash > f->local_path + strlen(root)) {
+            *last_slash = '\0';
+            krdp_make_parents(f->local_path);
+            *last_slash = '/';
+        }
         // A directory is materialised now; a file is written as its bytes arrive.
         if (f->is_directory) mkdir(f->local_path, 0700);
     }
@@ -516,12 +582,15 @@ static void krdp_request_current_file(krdp_client* client, CliprdrClientContext*
     int32_t next = client->transfer_current + 1;
     while (next < (int32_t)client->transfer_count && client->transfer_files[next].is_directory) next++;
     if (next >= (int32_t)client->transfer_count) {
-        // Every file is down: hand the paths to the UI and mark the transfer done.
+        // Every file is down: hand the top-level entries to the UI — that is
+        // what the user pastes (a copied folder arrives as one entry, with its
+        // contents already written beneath it), and mark the transfer done.
         if (client->on_clipboard_files) {
             const char** paths = calloc(client->transfer_count + 1, sizeof(char*));
             int kept = 0;
             for (uint32_t i = 0; i < client->transfer_count; i++) {
-                if (client->transfer_files[i].is_directory) continue;
+                // A nested entry carries a '/'; its parent is the entry to offer.
+                if (strchr(client->transfer_files[i].name, '/')) continue;
                 paths[kept++] = client->transfer_files[i].local_path;
             }
             client->on_clipboard_files(client->user, paths, kept);
