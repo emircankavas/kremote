@@ -1,4 +1,4 @@
-## KRemote v1.7.1
+## KRemote v1.7.2
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -6,20 +6,23 @@ connection tree with folder credential inheritance and mRemoteNG
 
 ### Fixes
 
-**RDP no longer crashes on connect (regression in v1.7.0).** Switching to
-`freerdp_client_context_new` moved the point at which the session's context is
-created: `ClientNew` now runs *inside* that call, whereas the old low-level path
-let the bridge bind its client into the context afterwards. A channel event
-(channel-connected) could therefore fire while `context->client` was still null,
-and the clipboard handler dereferenced it — a write to a small offset past address
-zero.
+**Dragging in a session draws a selection rectangle again.** A drag was sent as a
+button-bearing mouse event on every move. RDP carries the button state separately
+from the move — once pressed, the server holds it until the matching release — and
+the reference client's motion path sends a plain move. Re-asserting the button on
+each drag step is what stopped Explorer (and any other list) from marquee-selecting.
+Drags now send plain moves; press and release are unchanged, so drag-and-drop still
+works.
 
-The client is now bound inside `ClientNew`, before the context is returned, so it
-is never observably unbound; the channel handler also degrades to a no-op rather
-than dereferencing a null client. Frame throughput is unchanged: 31 fps measured
-against the same host.
+### Known limitation
 
-All of v1.7.0 down to v1.6.0 is included.
+Copying a file *out* of a session is not supported yet. FreeRDP assigns the
+handler for incoming file contents only when it is built with FUSE
+(`#if defined(WITH_FUSE)`), so there is no codec-side path to receive a remote file
+on macOS. Supporting it means requesting the file's bytes ourselves and writing
+them to disk (plus a place to put them), which is a feature of its own — text and
+files *into* a session both work.
+
 
 
 

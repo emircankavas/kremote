@@ -364,9 +364,19 @@ final class RDPHostView: NSView {
     override func mouseMoved(with event: NSEvent) {
         client?.sendMouseMove(at: remotePoint(convert(event.locationInWindow, from: nil)))
     }
-    override func mouseDragged(with event: NSEvent) { forwardMouse(event) }
-    override func rightMouseDragged(with event: NSEvent) { forwardMouse(event) }
-    override func otherMouseDragged(with event: NSEvent) { forwardMouse(event) }
+    override func mouseDragged(with event: NSEvent) {
+        // A drag is a plain MOVE, not another button press: the button state
+        // already went down and Windows holds it until the matching release.
+        // Re-sending the button bit on every move is what stopped a selection
+        // rectangle from being drawn in Explorer.
+        sendDragMove(event)
+    }
+    override func rightMouseDragged(with event: NSEvent) { sendDragMove(event) }
+    override func otherMouseDragged(with event: NSEvent) { sendDragMove(event) }
+
+    private func sendDragMove(_ event: NSEvent) {
+        client?.sendMouseMove(at: remotePoint(convert(event.locationInWindow, from: nil)))
+    }
     override func scrollWheel(with event: NSEvent) {
         client?.scroll(deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY)
     }
