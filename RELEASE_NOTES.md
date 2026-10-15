@@ -1,25 +1,32 @@
-## KRemote v1.7.5
+## KRemote v1.7.6
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
 `confCons.xml` import.
 
+### New
+
+**Session tabs now live in the window's title bar**, on the same line as the
+window controls and the session buttons, instead of taking a row of their own
+above the session — the Chrome model. Each tab is width-capped so a long title
+cannot push its neighbours out of view, and the strip scrolls when there are more
+tabs than fit.
+
 ### Fixes
 
-**A newly created connection shows its address immediately.** Saving an edit left
-the sidebar row reading "not configured" until the app was relaunched. The row
-took its resolved settings as an input value, and a `ConnectionNode` is a
-reference type — editing one mutates it in place, changing no observable
-`AppModel` property except `roots` (which is reassigned on save). A row that
-read none of that state was reused unchanged by SwiftUI, so its subtitle kept the
-value it had when the row was first built. The row now resolves its settings
-inside its own body, which is what subscribes it to the save, and the subtitle
-updates at once.
+**An RDP session that ends now closes its tab.** The pane used to keep the tab
+open unless the disconnect came back with no reason, but a server that drops the
+connection (logoff, desktop closed, transport lost) reports an error code, so the
+tab stayed open on a dead session. Any ended session now closes its tab. A
+connection that could not be *established* is treated differently: that keeps the
+tab so its reason can be read.
 
-The editor sheet also reloads its fields from the node's id rather than a
-once-set flag, so a reused sheet can never show the previous node's values.
+**"Reconnect" now appears when a connection fails**, not only after it drops. A
+failed attempt is exactly when a retry is wanted, and it is the one ended state
+that leaves the tab on screen.
 
-All of v1.7.4 back to v1.6.0 is included.
+All of v1.7.5 back to v1.6.0 is included.
+
 
 
 

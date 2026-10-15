@@ -19,7 +19,15 @@ struct ContentView: View {
         }
         .navigationTitle("KRemote")
         .toolbar {
-            // These sit in the window's title bar, on the same line as "KRemote".
+            // Tabs live here, in the window's title bar, rather than in a row of
+            // their own above the session — the Chrome model. `.principal` keeps
+            // them clear of the window controls on the left.
+            ToolbarItem(placement: .principal) {
+                if !model.sessions.isEmpty {
+                    TabStrip()
+                }
+            }
+            // The session controls sit on the same line, on the right.
             ToolbarItemGroup(placement: .primaryAction) {
                 SessionToolbarItems()
             }

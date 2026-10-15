@@ -12,21 +12,24 @@ struct DetailView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        // The tab strip lives in the window toolbar (see `ContentView`), so the
+        // detail area is just the session surface. Chrome-style: tabs share the
+        // title bar with the window controls instead of taking a row of their own.
         if model.sessions.isEmpty {
             PlaceholderView()
         } else {
-            VStack(spacing: 0) {
-                TabStrip()
-                Divider()
-                TerminalArea()
-            }
+            TerminalArea()
         }
     }
 }
 
-// MARK: - Tab strip (with the session toolbar on the right)
+// MARK: - Tab strip (lives in the window toolbar)
 
-private struct TabStrip: View {
+/// The session tabs, shown in the window's title bar.
+///
+/// Sized for a toolbar rather than a content row: shorter padding, and each tab
+/// is capped so a long title cannot push its neighbours out of view.
+struct TabStrip: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
@@ -40,11 +43,9 @@ private struct TabStrip: View {
                     }
                 }
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
+            .padding(.horizontal, 2)
         }
-        .frame(height: 34)
-        .background(.bar)
+        .frame(maxWidth: 720)
     }
 }
 
@@ -57,23 +58,26 @@ private struct TabButton: View {
     @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             Image(systemName: "terminal")
-                .font(.caption)
+                .font(.caption2)
             Text(session.displayTitle)
+                .font(.caption)
                 .lineLimit(1)
+                .truncationMode(.middle)
             Button(action: onClose) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 8, weight: .bold))
             }
             .buttonStyle(.plain)
             .opacity(isHovering || isActive ? 1 : 0)
             .help("Close tab")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .frame(maxWidth: 180)
         .background(
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: 5)
                 .fill(isActive ? Color.accentColor.opacity(0.22) : Color.clear)
         )
         .contentShape(Rectangle())
@@ -490,10 +494,18 @@ private struct RDPSessionContent: View {
                 onStateChange: { newState in
                     guard model.currentGeneration(of: session.id) == session.generation else { return }
                     state = newState
-                    // A clean remote disconnect closes the tab; a failure keeps it
-                    // open so its reason stays on screen.
-                    if case .disconnected(let reason) = newState, reason == nil {
-                        onClose()
+                    // The session ended — the remote logged off, closed the
+                    // desktop, or the transport dropped. A dead tab has nothing
+                    // left to show, so close it. A connection that could not be
+                    // *established* is different: its reason is worth reading and
+                    // a retry is plausible, so that keeps the tab and offers
+                    // "Reconnect" instead.
+                    //
+                    // Closing is deferred a runloop turn: this runs while the
+                    // pane is being updated, and removing the session re-enters
+                    // SwiftUI mid-update.
+                    if case .disconnected = newState {
+                        DispatchQueue.main.async { onClose() }
                     }
                 },
                 onFocus: onFocus,
@@ -559,7 +571,10 @@ private struct RDPSessionContent: View {
         .background(.bar)
     }
 
+    /// A failed attempt is the one ended state that keeps the RDP tab on screen
+    /// (an ended session closes it), so it is the one that offers "Reconnect".
     private var isDisconnected: Bool {
+        if case .failed = state { return true }
         if case .disconnected = state { return true }
         return false
     }
