@@ -282,14 +282,6 @@ final class RDPHostView: NSView {
         ]
     }
 
-    /// One decoded frame, waiting to be turned into a CGImage. Frames arriving
-    /// while one is pending replace it: an EGFX desktop can deliver far more than
-    /// Swift can present, and showing only the newest keeps latency bounded
-    /// instead of building a backlog that reads as the picture freezing and then
-    /// jumping.
-    private var pendingFrame: (data: Data, width: Int, height: Int, stride: Int)?
-    private var frameFlushScheduled = false
-
     /// This view's size in device pixels — what the remote desktop should be.
     ///
     /// Requesting the desktop in *points* is what made it look low-resolution:
@@ -315,49 +307,12 @@ final class RDPHostView: NSView {
         )
     }
 
-    /// Blits a decoded frame. `data` is already an owned copy taken on FreeRDP's
-    /// thread, so it is safe to hand to CoreGraphics here.
-    ///
-    /// Only the most recent frame is kept: converting and presenting happens on
-    /// the next runloop pass, and by then three more may have arrived. Coalescing
-    /// here is what keeps a busy desktop smooth rather than stop-start.
-    func presentFrame(_ data: Data, width: Int, height: Int, stride: Int) {
-        guard width > 0, height > 0, stride > 0, data.count >= stride * height else { return }
-        pendingFrame = (data, width, height, stride)
-        guard !frameFlushScheduled else { return }
-        frameFlushScheduled = true
-        DispatchQueue.main.async { [weak self] in self?.flushFrame() }
-    }
-
-    private func flushFrame() {
-        frameFlushScheduled = false
-        guard let frame = pendingFrame else { return }
-        pendingFrame = nil
-        let (data, width, height, stride) = frame
-        desktopSize = CGSize(width: width, height: height)
-        // CGDataProvider retains the CFData we hand it, so the buffer outlives
-        // the CGImage without an extra copy.
-        let provider = CGDataProvider(data: data as CFData)
-        guard let provider else { return }
-
-        // FreeRDP's PIXEL_FORMAT_BGRA32 is little-endian BGRA, which CoreGraphics
-        // spells as 32-bit little-endian with a skip-first (bgra) layout.
-        let bitmapInfo = CGBitmapInfo(rawValue:
-            CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
-        guard let image = CGImage(
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bitsPerPixel: 32,
-            bytesPerRow: stride,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: bitmapInfo,
-            provider: provider,
-            decode: nil,
-            shouldInterpolate: false,
-            intent: .defaultIntent
-        ) else { return }
-
+    /// Shows a finished frame. The CGImage was built on FreeRDP's thread, so the
+    /// main thread only assigns it. Only the most recent frame matters: if several
+    /// arrived while main was busy, the newest wins and the rest are dropped, which
+    /// keeps the picture live instead of playing catch-up.
+    func presentFrame(_ image: CGImage) {
+        desktopSize = CGSize(width: image.width, height: image.height)
         wantsLayer = true
         // Wrapped so the assignment is not animated (see `attach`).
         CATransaction.begin()

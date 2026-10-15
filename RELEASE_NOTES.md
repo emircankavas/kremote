@@ -1,4 +1,4 @@
-## KRemote v1.6.5
+## KRemote v1.6.6
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -6,26 +6,31 @@ connection tree with folder credential inheritance and mRemoteNG
 
 ### Fixes
 
-**RDP should stop hitching.** FreeRDP's codec thread pool races with the graphics
-pipeline's surface handling, and this build left it on. Decoding now runs on the
-session thread (`THREADING_FLAGS_DISABLE_THREADS`) — the same fix the reference
-macOS client needed for exactly this symptom. Single-threaded decode is ample for
-one desktop.
+**RDP frame handling was costing the main thread a lot per frame.** The desktop
+image was assembled on the main actor and tagged in a way CoreAnimation will not
+take directly:
 
-**File paste is rebuilt on the mechanism that actually works.** The file list was
-being hand-assembled from `stat(2)` and advertised under a raw `CF_HDROP` id.
-A server does neither: it matches the format by *name*, and it expects the
-descriptor list to be built the way Explorer builds it — folders descended, sizes
-resolved, paths relative. That conversion is winpr's job, so the file list now
-goes through a winpr clipboard: the paths are handed in as a `text/uri-list`,
-winpr produces the `FILEDESCRIPTORW` records, and the format is registered and
-advertised under its real name, `FileGroupDescriptorW`.
+- Every frame allocated and copied the whole desktop on the main thread. It is now
+  built on FreeRDP's thread; only the finished image crosses to the UI.
+- The pixels were tagged device-RGB with alpha skipped. Core Animation takes a
+  CGImage's bytes as-is only for sRGB + premultiplied alpha; anything else makes
+  it re-render through CoreGraphics on the main thread *for every frame* — the
+  same cost the reference macOS client measured and avoided. The image is now
+  sRGB + premultiplied (with the alpha byte forced opaque during the copy).
 
-Alongside that, the earlier handshake gaps stay fixed: the local file capability
-is registered, the server's capability flags are recorded, and the format lists
-are announced/retired through the file context.
+**Copying a file into a session works** (from v1.6.5 — the file list now goes
+through a winpr clipboard and is advertised under its real name,
+`FileGroupDescriptorW`).
 
-All of v1.6.4 down to v1.6.0 is included.
+### Known limitation
+
+Copying a file *out* of a session is not supported yet. FreeRDP routes incoming
+files through a FUSE mount, and this build has no FUSE; a macOS client also needs
+a File Provider extension to hand the files to the Finder. That is a separate
+feature, not a setting.
+
+All of v1.6.5 down to v1.6.0 is included.
+
 
 
 

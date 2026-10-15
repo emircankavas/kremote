@@ -126,12 +126,12 @@ final class RDPClient {
         let callbacks = RDPBridgeCallbacks(
             onFrame: { bgra, width, height, stride in
                 guard let bgra, width > 0, height > 0, stride > 0 else { return }
-                // FreeRDP's paint buffer is only valid during the callback, so
-                // take an owned copy before hopping to the main actor.
-                let data = Data(bytes: bgra, count: stride * height)
-                Task { @MainActor in
-                    sink.deliverFrame(data, width: width, height: height, stride: stride)
-                }
+                // Build the CGImage *here*, on FreeRDP's thread, not on the main
+                // actor: it is a per-frame allocation and copy of the whole
+                // desktop, and doing it on main is what made a busy screen hitch.
+                // Only the finished image crosses to the UI.
+                guard let image = RDPClient.makeFrameImage(bgra, width: width, height: height, stride: stride) else { return }
+                Task { @MainActor in sink.deliverFrameImage(image) }
             },
             onState: { state, message in
                 let mapped = RDPClient.map(state: state, message: message)
@@ -259,6 +259,48 @@ final class RDPClient {
         krdp_client_key(handle, scancode, extended, isDown)
     }
 
+    /// Builds a CGImage from a FreeRDP BGRA frame, on the caller's thread.
+    ///
+    /// Two things matter for speed here, and both were wrong before:
+    ///  * The bytes are tagged sRGB + premultiplied alpha. CoreAnimation takes a
+    ///    CGImage's bytes as-is only for that exact combination; anything else
+    ///    (device-RGB, skip-alpha) makes it convert through CoreGraphics on the
+    ///    main thread *per frame*. FreeRDP does not promise the alpha byte, so it
+    ///    is forced opaque during the copy, which also avoids a frame tagged
+    ///    premultiplied-with-alpha-0 landing as an invisible desktop.
+    ///  * It is built off the main thread — the copy alone is the size of the
+    ///    whole desktop, every frame.
+    nonisolated static func makeFrameImage(
+        _ bgra: UnsafePointer<UInt8>, width: Int, height: Int, stride: Int
+    ) -> CGImage? {
+        let length = stride * height
+        guard length > 0 else { return nil }
+        guard let copy = malloc(length) else { return nil }
+        let destination = copy.assumingMemoryBound(to: UInt32.self)
+        let source = UnsafeRawPointer(bgra).assumingMemoryBound(to: UInt32.self)
+        let words = length / 4
+        for i in 0..<words { destination[i] = source[i] | 0xFF000000 }  // force alpha
+
+        guard let provider = CGDataProvider(
+            dataInfo: nil, data: copy, size: length,
+            releaseData: { _, pointer, _ in free(UnsafeMutableRawPointer(mutating: pointer)) }
+        ) else { free(copy); return nil }
+        defer { }  // provider owns `copy` now
+
+        let info = CGBitmapInfo(rawValue:
+            CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        let colorSpace = sRGBColorSpace
+        return CGImage(
+            width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: stride, space: colorSpace, bitmapInfo: info,
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
+        )
+    }
+
+    /// Shared sRGB space; creating one per frame is needless work.
+    nonisolated static let sRGBColorSpace = CGColorSpace(name: CGColorSpace.sRGB)
+        ?? CGColorSpaceCreateDeviceRGB()
+
     /// Pure mapping from the C enum; `nonisolated` and static so the callback
     /// does not have to capture anything from an instance.
     nonisolated static func map(state: krdp_state, message: String?) -> RDPClientState {
@@ -287,8 +329,8 @@ final class RDPBridgeSink {
     /// Text the remote clipboard now holds.
     var onClipboard: ((String) -> Void)?
 
-    func deliverFrame(_ data: Data, width: Int, height: Int, stride: Int) {
-        view?.presentFrame(data, width: width, height: height, stride: stride)
+    func deliverFrameImage(_ image: CGImage) {
+        view?.presentFrame(image)
     }
 
     func deliverState(_ state: RDPClientState) {
