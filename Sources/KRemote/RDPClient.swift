@@ -56,6 +56,9 @@ final class RDPClient {
         sink.onClipboard = { [weak self] text in
             self?.onRemoteClipboardText?(text)
         }
+        sink.onClipboardFiles = { [weak self] paths in
+            self?.onRemoteClipboardFiles?(paths)
+        }
     }
 
     /// Called on the main actor when the server demands credentials the tree did
@@ -65,6 +68,12 @@ final class RDPClient {
 
     /// Called on the main actor with text the remote clipboard now holds.
     var onRemoteClipboardText: (@MainActor (String) -> Void)?
+
+    /// Called on the main actor with files the remote clipboard now holds. Each
+    /// path is an absolute local file the bridge has already downloaded into a
+    /// temporary directory; the receiver is expected to put them on the
+    /// pasteboard (as file URLs) so Finder can paste them.
+    var onRemoteClipboardFiles: (@MainActor ([String]) -> Void)?
 
     /// Tells the server what the local clipboard holds, enabling paste inside the
     /// session. An empty string announces an empty clipboard.
@@ -146,6 +155,18 @@ final class RDPClient {
                 // FreeRDP's buffer is freed once this returns, so copy it first.
                 let copied = String(cString: text)
                 Task { @MainActor in sink.deliverClipboard(copied) }
+            },
+            onClipboardFiles: { paths, count in
+                // The C side's array and strings are freed once this returns;
+                // copy them into Swift values first.
+                var copied: [String] = []
+                if let paths, count > 0 {
+                    copied.reserveCapacity(count)
+                    for i in 0..<count {
+                        if let path = paths[i] { copied.append(String(cString: path)) }
+                    }
+                }
+                Task { @MainActor in sink.deliverClipboardFiles(copied) }
             }
         )
         let retained = Unmanaged.passRetained(callbacks)
@@ -191,6 +212,7 @@ final class RDPClient {
                             rdpStateCallback,
                             rdpCredentialsCallback,
                             rdpClipboardCallback,
+                            rdpClipboardFilesCallback,
                             pointer
                         )
                     }
@@ -328,6 +350,9 @@ final class RDPBridgeSink {
     var onCredentials: ((String, String) -> Void)?
     /// Text the remote clipboard now holds.
     var onClipboard: ((String) -> Void)?
+    /// Files the remote clipboard now holds, already written to disk under a
+    /// temporary directory the bridge owns.
+    var onClipboardFiles: (([String]) -> Void)?
 
     func deliverFrameImage(_ image: CGImage) {
         view?.presentFrame(image)
@@ -343,6 +368,10 @@ final class RDPBridgeSink {
 
     func deliverClipboard(_ text: String) {
         onClipboard?(text)
+    }
+
+    func deliverClipboardFiles(_ paths: [String]) {
+        onClipboardFiles?(paths)
     }
 }
 
@@ -360,17 +389,20 @@ private final class RDPBridgeCallbacks: Sendable {
     let onState: @Sendable (krdp_state, String?) -> Void
     let onCredentials: @Sendable (String, String) -> Void
     let onClipboard: @Sendable (UnsafePointer<CChar>) -> Void
+    let onClipboardFiles: @Sendable (UnsafePointer<UnsafePointer<CChar>?>?, Int) -> Void
 
     init(
         onFrame: @escaping @Sendable (UnsafePointer<UInt8>?, Int, Int, Int) -> Void,
         onState: @escaping @Sendable (krdp_state, String?) -> Void,
         onCredentials: @escaping @Sendable (String, String) -> Void,
-        onClipboard: @escaping @Sendable (UnsafePointer<CChar>) -> Void
+        onClipboard: @escaping @Sendable (UnsafePointer<CChar>) -> Void,
+        onClipboardFiles: @escaping @Sendable (UnsafePointer<UnsafePointer<CChar>?>?, Int) -> Void
     ) {
         self.onFrame = onFrame
         self.onState = onState
         self.onCredentials = onCredentials
         self.onClipboard = onClipboard
+        self.onClipboardFiles = onClipboardFiles
     }
 }
 
@@ -418,6 +450,16 @@ private func rdpClipboardCallback(
     guard let user, let utf8 else { return }
     let callbacks = Unmanaged<RDPBridgeCallbacks>.fromOpaque(user).takeUnretainedValue()
     callbacks.onClipboard(utf8)
+}
+
+private func rdpClipboardFilesCallback(
+    _ user: UnsafeMutableRawPointer?,
+    _ paths: UnsafePointer<UnsafePointer<CChar>?>?,
+    _ count: Int32
+) {
+    guard let user else { return }
+    let callbacks = Unmanaged<RDPBridgeCallbacks>.fromOpaque(user).takeUnretainedValue()
+    callbacks.onClipboardFiles(paths, Int(count))
 }
 
 private extension RDPClient.MouseButton {

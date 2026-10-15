@@ -39,6 +39,14 @@ typedef void (*krdp_credentials_cb)(void* user, const char* username, const char
 /// Swift copies the text and touches NSPasteboard on the main actor.
 typedef void (*krdp_clipboard_cb)(void* user, const char* utf8);
 
+/// Reports that the remote side put files on its clipboard. `paths` holds one
+/// absolute local path per file, already downloaded to a temporary directory by
+/// the bridge (the actual bytes are pulled from the server over the clipboard
+/// channel — no FUSE involved). Runs on the session thread; Swift copies the
+/// list, touches NSPasteboard on the main actor, and is free to move or delete
+/// the files afterwards. `count` may be 0 when the remote clipboard was cleared.
+typedef void (*krdp_clipboard_files_cb)(void* user, const char* const* paths, int count);
+
 typedef struct {
     const char* host;
     uint16_t port;
@@ -72,6 +80,7 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
                                 krdp_state_cb on_state,
                                 krdp_credentials_cb on_credentials,
                                 krdp_clipboard_cb on_clipboard,
+                                krdp_clipboard_files_cb on_clipboard_files,
                                 void* user);
 
 /// Announces the local clipboard's text to the server. Pass NULL to announce an

@@ -47,6 +47,27 @@
 #include <winpr/thread.h>
 #include <winpr/ssl.h>
 #include <winpr/interlocked.h>
+#include <errno.h>
+#include <limits.h>   /* PATH_MAX */
+#include <sys/stat.h> /* mkdir */
+#include <stdlib.h>   /* system, getenv */
+
+// MARK: - Remote file transfers (server -> Mac)
+
+/// One file the server announced in its `FileGroupDescriptorW` list, with the
+/// local path it is being written to. The name is sanitised on arrival: it came
+/// from the server and must never escape the transfer directory.
+typedef struct {
+    /// Sanitised single-component name, NUL-terminated UTF-8.
+    char* name;
+    /// Absolute local path under the transfer directory.
+    char* local_path;
+    /// Declared size, or -1 when the server did not say.
+    int64_t size;
+    bool is_directory;
+    /// Bytes written so far; a directory is created instead.
+    uint64_t written;
+} krdp_transfer_file;
 
 // MARK: - Context
 
@@ -119,7 +140,6 @@ struct krdp_client {
     int clipboard_file_count;
     /// FreeRDP's file-clipboard helper. It owns the file handles, answers the
     /// lock/unlock and FILECONTENTS messages, and claims `cliprdr->custom`.
-    /// Remote -> Mac is not supported: that path needs FUSE, absent here.
     CliprdrFileContext* cliprdr_file;
     /// winpr clipboard backing the file format. Files are handed in as a
     /// `text/uri-list`; winpr stats every path (descending into folders) and
@@ -128,6 +148,35 @@ struct krdp_client {
     /// format list must advertise — not a raw CF_HDROP.
     wClipboard* clipboard;
     UINT32 clipboard_file_format_id;
+
+    // File clipboard (remote -> Mac). The server announces its files as a
+    // `FileGroupDescriptorW` list; we ask for each file's bytes over the same
+    // clipboard channel (CB_FILECONTENTS_*) and write them to a temporary
+    // directory, then hand the paths to the UI, which puts them on the pasteboard.
+    // FreeRDP only wires its own file-contents handler under FUSE, so this bridge
+    // installs its own `ServerFileContentsResponse` and does the writing itself.
+    krdp_clipboard_files_cb on_clipboard_files;
+    /// The id the server gave `FileGroupDescriptorW` in its format list; 0 when
+    /// it announced no files.
+    UINT32 remote_file_format_id;
+    /// The format id of the request whose response is currently outstanding, so
+    /// a response can be told apart (text vs. the file list).
+    UINT32 pending_format_id;
+    /// Lock the server put on the file list we are reading, so it stays
+    /// readable after the remote clipboard changes. 0 when it offered none.
+    UINT32 remote_clip_data_id;
+    UINT32 next_clip_data_id;
+    bool can_lock_clip_data;
+    /// The transfers in flight, populated when the file list arrives.
+    krdp_transfer_file* transfer_files;
+    uint32_t transfer_count;
+    /// Index of the file being downloaded, or -1 when idle.
+    int32_t transfer_current;
+    /// True while the outstanding request is a size query, whose 8-byte answer
+    /// is the length rather than content.
+    bool transfer_size_pending;
+    /// The directory the downloaded files are written to, for this transfer.
+    char* transfer_dir;
 
     freerdp* instance;
     HANDLE thread;
@@ -327,6 +376,245 @@ static krdp_client* krdp_client_from_cliprdr(CliprdrClientContext* ctx)
     return file ? (krdp_client*)cliprdr_file_context_get_context(file) : NULL;
 }
 
+// MARK: - File clipboard (remote -> Mac)
+
+/// Sends the contents request for the file currently being downloaded. Each
+/// request's `streamId` is the file's index, so its response is matched without
+/// a lookup table.
+static void krdp_request_current_file(krdp_client* client, CliprdrClientContext* cliprdr);
+
+/// Frees the transfer state and, when asked, removes the directory it wrote to.
+static void krdp_clear_transfer(krdp_client* client, bool remove_files)
+{
+    if (!client) return;
+    if (remove_files && client->transfer_dir) {
+        // Only ever touches the directory this bridge created under the temp dir.
+        char command[4096];
+        snprintf(command, sizeof(command), "rm -rf '%s'", client->transfer_dir);
+        if (system(command) != 0) { /* best effort */ }
+    }
+    for (uint32_t i = 0; i < client->transfer_count; i++) {
+        free(client->transfer_files[i].name);
+        free(client->transfer_files[i].local_path);
+    }
+    free(client->transfer_files);
+    client->transfer_files = NULL;
+    client->transfer_count = 0;
+    client->transfer_current = -1;
+    free(client->transfer_dir);
+    client->transfer_dir = NULL;
+}
+
+/// Strips a server-supplied path down to one safe component.
+///
+/// The name comes from the remote side, so it is untrusted: a `..`, an absolute
+/// path or a `/` must never be able to steer the write outside the transfer
+/// directory (a path-traversal guard, not a nicety). Windows separators are
+/// folded to `/`, the last component is taken, and anything still dangerous is
+/// replaced.
+static char* krdp_sanitise_name(const uint16_t* utf16_name)
+{
+    if (!utf16_name) return NULL;
+    char* raw = krdp_utf16le_to_utf8((const BYTE*)utf16_name, 0);
+    // `krdp_utf16le_to_utf8` with length 0 expects a terminated string; rebuild
+    // explicitly instead, so an over-long name cannot read past the descriptor.
+    free(raw);
+    char buffer[512];
+    size_t o = 0;
+    for (size_t i = 0; i < 259 && utf16_name[i] && o + 4 < sizeof(buffer); i++) {
+        uint32_t cp = utf16_name[i];
+        if (cp >= 0xD800 && cp <= 0xDBFF && utf16_name[i + 1] >= 0xDC00 && utf16_name[i + 1] <= 0xDFFF) {
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (utf16_name[i + 1] - 0xDC00);
+            i++;
+        }
+        if (cp == '\\') cp = '/';
+        // A separator cannot appear in a single-component name, and control
+        // characters would corrupt the path.
+        if (cp == '/' || cp < 0x20) cp = '_';
+        if (cp < 0x80) {
+            buffer[o++] = (char)cp;
+        } else if (cp < 0x800) {
+            buffer[o++] = (char)(0xC0 | (cp >> 6));
+            buffer[o++] = (char)(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            buffer[o++] = (char)(0xE0 | (cp >> 12));
+            buffer[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            buffer[o++] = (char)(0x80 | (cp & 0x3F));
+        } else {
+            buffer[o++] = (char)(0xF0 | (cp >> 18));
+            buffer[o++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+            buffer[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            buffer[o++] = (char)(0x80 | (cp & 0x3F));
+        }
+    }
+    buffer[o] = '\0';
+    if (o == 0) return NULL;
+    if (strcmp(buffer, ".") == 0 || strcmp(buffer, "..") == 0) return NULL;
+    return krdp_strdup(buffer);
+}
+
+/// Parses the server's `FileGroupDescriptorW` payload into transfer entries and
+/// starts the first download. An empty list clears any previous transfer.
+static void krdp_begin_transfer(krdp_client* client, CliprdrClientContext* cliprdr,
+                                const BYTE* data, UINT32 size)
+{
+    if (!client || !cliprdr || !data) return;
+
+    FILEDESCRIPTORW* descriptors = NULL;
+    UINT32 count = 0;
+    if (cliprdr_parse_file_list(data, size, &descriptors, &count) != CHANNEL_RC_OK || count == 0) {
+        free(descriptors);
+        return;
+    }
+
+    // Replace whatever is in flight; the previous copy's lock is deliberately
+    // left to the server (it expires with the clipboard).
+    krdp_clear_transfer(client, true);
+
+    // One directory per transfer, so a new paste never collides with the old.
+    char root[PATH_MAX];
+    const char* tmp = getenv("TMPDIR");
+    snprintf(root, sizeof(root), "%s/kremote-paste-%llu",
+             (tmp && *tmp) ? tmp : "/tmp", (unsigned long long)winpr_GetTickCount64());
+    if (mkdir(root, 0700) != 0 && errno != EEXIST) {
+        free(descriptors);
+        return;
+    }
+
+    client->transfer_files = calloc(count, sizeof(krdp_transfer_file));
+    if (!client->transfer_files) { free(descriptors); return; }
+    client->transfer_dir = krdp_strdup(root);
+    client->transfer_count = count;
+
+    for (UINT32 i = 0; i < count; i++) {
+        const FILEDESCRIPTORW* d = &descriptors[i];
+        krdp_transfer_file* f = &client->transfer_files[i];
+        f->name = krdp_sanitise_name(d->cFileName);
+        f->is_directory = (d->dwFlags & FD_ATTRIBUTES) && (d->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+        f->size = (d->dwFlags & FD_FILESIZE)
+                      ? (int64_t)(((uint64_t)d->nFileSizeHigh << 32) | d->nFileSizeLow)
+                      : -1;
+        if (!f->name) f->name = krdp_strdup("unnamed");
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", root, f->name);
+        f->local_path = krdp_strdup(path);
+        // A directory is materialised now; a file is written as its bytes arrive.
+        if (f->is_directory) mkdir(f->local_path, 0700);
+    }
+    free(descriptors);
+
+    client->transfer_current = -1;
+    krdp_request_current_file(client, cliprdr);
+}
+
+/// Advances to the next file and requests its first block (or its size first,
+/// when the server did not declare one).
+static void krdp_request_current_file(krdp_client* client, CliprdrClientContext* cliprdr)
+{
+    if (!client || !cliprdr) return;
+    // Skip directories: they were already created and carry no bytes.
+    int32_t next = client->transfer_current + 1;
+    while (next < (int32_t)client->transfer_count && client->transfer_files[next].is_directory) next++;
+    if (next >= (int32_t)client->transfer_count) {
+        // Every file is down: hand the paths to the UI and mark the transfer done.
+        if (client->on_clipboard_files) {
+            const char** paths = calloc(client->transfer_count + 1, sizeof(char*));
+            int kept = 0;
+            for (uint32_t i = 0; i < client->transfer_count; i++) {
+                if (client->transfer_files[i].is_directory) continue;
+                paths[kept++] = client->transfer_files[i].local_path;
+            }
+            client->on_clipboard_files(client->user, paths, kept);
+            free(paths);
+        }
+        client->transfer_current = -1;
+        return;
+    }
+    client->transfer_current = next;
+
+    // Without a declared size the first request must ask for it: MS-RDPECLIP
+    // 2.2.5.3 has a size request carry position 0 and ask for exactly 8 bytes.
+    const krdp_transfer_file* f = &client->transfer_files[next];
+    const bool size_only = (f->size < 0 && f->written == 0);
+    client->transfer_size_pending = size_only;
+
+    CLIPRDR_FILE_CONTENTS_REQUEST request;
+    memset(&request, 0, sizeof(request));
+    request.common.msgType = CB_FILECONTENTS_REQUEST;
+    request.streamId = (UINT32)(next + 1);
+    request.listIndex = (UINT32)next;
+    request.dwFlags = size_only ? FILECONTENTS_SIZE : FILECONTENTS_RANGE;
+    request.nPositionLow = size_only ? 0 : (UINT32)(f->written & 0xFFFFFFFFu);
+    request.nPositionHigh = size_only ? 0 : (UINT32)(f->written >> 32);
+    request.cbRequested = size_only ? 8 : 65536;
+    request.haveClipDataId = client->remote_clip_data_id != 0;
+    request.clipDataId = client->remote_clip_data_id;
+    (void)cliprdr->ClientFileContentsRequest(cliprdr, &request);
+}
+
+/// Requests the next block of the file at `index` from its current offset.
+static void krdp_request_next_block(krdp_client* client, CliprdrClientContext* cliprdr, int32_t index)
+{
+    const krdp_transfer_file* f = &client->transfer_files[index];
+    client->transfer_size_pending = false;
+    CLIPRDR_FILE_CONTENTS_REQUEST request;
+    memset(&request, 0, sizeof(request));
+    request.common.msgType = CB_FILECONTENTS_REQUEST;
+    request.streamId = (UINT32)(index + 1);
+    request.listIndex = (UINT32)index;
+    request.dwFlags = FILECONTENTS_RANGE;
+    request.nPositionLow = (UINT32)(f->written & 0xFFFFFFFFu);
+    request.nPositionHigh = (UINT32)(f->written >> 32);
+    request.cbRequested = 65536;
+    request.haveClipDataId = client->remote_clip_data_id != 0;
+    request.clipDataId = client->remote_clip_data_id;
+    (void)cliprdr->ClientFileContentsRequest(cliprdr, &request);
+}
+
+/// The bytes (or the size) the server sent for one file.
+static UINT krdp_cliprdr_server_file_contents_response(CliprdrClientContext* ctx,
+                                                       const CLIPRDR_FILE_CONTENTS_RESPONSE* response)
+{
+    krdp_client* client = krdp_client_from_cliprdr(ctx);
+    if (!client || client->transfer_current < 0) return CHANNEL_RC_OK;
+
+    const int32_t index = client->transfer_current;
+    krdp_transfer_file* f = &client->transfer_files[index];
+    const bool ok = (response->common.msgFlags & CB_RESPONSE_OK) != 0;
+
+    if (!ok || !response->requestedData || response->cbRequested == 0) {
+        // Give up on this one file and move on, so a refusal cannot wedge the rest.
+        krdp_request_current_file(client, ctx);
+        return CHANNEL_RC_OK;
+    }
+
+    // A size answer is 8 bytes: the file length, low half first. The size is
+    // only the size — the bytes still have to be fetched.
+    if (client->transfer_size_pending) {
+        uint64_t size64 = 0;
+        memcpy(&size64, response->requestedData, 8);
+        f->size = (int64_t)size64;
+        krdp_request_next_block(client, ctx, index);
+        return CHANNEL_RC_OK;
+    }
+
+    // Write in append mode and track the offset, so a large file arrives in
+    // blocks and none of it is held in memory.
+    FILE* handle = fopen(f->local_path, f->written == 0 ? "wb" : "ab");
+    if (handle) {
+        fwrite(response->requestedData, 1, response->cbRequested, handle);
+        fclose(handle);
+        f->written += response->cbRequested;
+    }
+
+    if (f->size >= 0 && f->written >= (uint64_t)f->size) {
+        krdp_request_current_file(client, ctx);   // done with this one, on to the next
+    } else {
+        krdp_request_next_block(client, ctx, index);
+    }
+    return CHANNEL_RC_OK;
+}
+
 /// Builds the `CLIPRDR_FILELIST` for the files currently on the clipboard, or NULL
 /// when there are none.
 ///
@@ -508,14 +796,46 @@ static UINT krdp_cliprdr_server_format_list(CliprdrClientContext* ctx, const CLI
     response.common.msgFlags = CB_RESPONSE_OK;
     ctx->ClientFormatListResponse(ctx, &response);
 
-    // Ask for the content straight away: prefer Unicode, fall back to ANSI.
-    UINT32 wanted = 0;
+    // Classify what the server is offering. Text wins over files: a mail item,
+    // for one, arrives as both and a paste into a text field wants the text.
+    bool has_text = false;
+    UINT32 file_format = 0;
     for (UINT32 i = 0; list && i < list->numFormats; i++) {
-        if (list->formats[i].formatId == CF_UNICODETEXT) { wanted = CF_UNICODETEXT; break; }
-        if (list->formats[i].formatId == CF_TEXT && wanted == 0) wanted = CF_TEXT;
+        const UINT32 id = list->formats[i].formatId;
+        const char* name = list->formats[i].formatName;
+        if (id == CF_UNICODETEXT) has_text = true;
+        else if (name && strcmp(name, "FileGroupDescriptorW") == 0) file_format = id;
     }
-    if (wanted == 0) return CHANNEL_RC_OK;
+    if (client) {
+        client->remote_file_format_id = file_format;
+        // Lock the announced file list so it stays readable once the remote
+        // clipboard moves on; older locks belong to an earlier copy and are
+        // released when that transfer is replaced.
+        if (file_format && !has_text && client->can_lock_clip_data) {
+            CLIPRDR_LOCK_CLIPBOARD_DATA lock;
+            memset(&lock, 0, sizeof(lock));
+            lock.common.msgType = CB_LOCK_CLIPDATA;
+            lock.clipDataId = ++client->next_clip_data_id;
+            if (lock.clipDataId == 0) lock.clipDataId = ++client->next_clip_data_id;
+            if (ctx->ClientLockClipboardData(ctx, &lock) == CHANNEL_RC_OK) {
+                client->remote_clip_data_id = lock.clipDataId;
+            }
+        }
+    }
 
+    // Ask for the content straight away: the text if there is any, otherwise
+    // the file list (names and sizes only — no bytes move until a paste).
+    UINT32 wanted = 0;
+    if (has_text) {
+        for (UINT32 i = 0; list && i < list->numFormats; i++) {
+            if (list->formats[i].formatId == CF_UNICODETEXT) { wanted = CF_UNICODETEXT; break; }
+        }
+    } else if (file_format) {
+        wanted = file_format;
+    }
+    if (wanted == 0 || !client) return CHANNEL_RC_OK;
+
+    client->pending_format_id = wanted;
     CLIPRDR_FORMAT_DATA_REQUEST request;
     memset(&request, 0, sizeof(request));
     request.common.msgType = CB_FORMAT_DATA_REQUEST;
@@ -576,15 +896,21 @@ static UINT krdp_cliprdr_server_format_data_response(CliprdrClientContext* ctx,
                                                      const CLIPRDR_FORMAT_DATA_RESPONSE* response)
 {
     krdp_client* client = krdp_client_from_cliprdr(ctx);
-    if (!client || !client->on_clipboard) return CHANNEL_RC_OK;
+    if (!client) return CHANNEL_RC_OK;
+    const bool ok = (response->common.msgFlags & CB_RESPONSE_OK) && response->requestedFormatData;
 
-    char* utf8 = NULL;
-    if ((response->common.msgFlags & CB_RESPONSE_OK) && response->requestedFormatData) {
-        utf8 = krdp_utf16le_to_utf8(response->requestedFormatData, response->common.dataLen);
+    // A file list answers the request for the server's file format: parse it and
+    // start pulling each file's bytes. Anything else is text.
+    if (ok && client->remote_file_format_id != 0 &&
+        client->pending_format_id == client->remote_file_format_id) {
+        krdp_begin_transfer(client, ctx, response->requestedFormatData, response->common.dataLen);
+    } else if (client->on_clipboard) {
+        char* utf8 = NULL;
+        if (ok) utf8 = krdp_utf16le_to_utf8(response->requestedFormatData, response->common.dataLen);
+        // An empty string is meaningful: the remote clipboard was cleared.
+        client->on_clipboard(client->user, utf8 ? utf8 : "");
+        free(utf8);
     }
-    // An empty string is meaningful: the remote clipboard was cleared.
-    client->on_clipboard(client->user, utf8 ? utf8 : "");
-    free(utf8);
     return CHANNEL_RC_OK;
 }
 
@@ -742,7 +1068,17 @@ static void krdp_channel_connected(void* ctx, const ChannelConnectedEventArgs* e
             // so a file copy is silently a no-op. `has_local_support` (a FUSE
             // question) does not apply to Mac -> remote, so this is set directly.
             cliprdr_file_context_set_locally_available(client->cliprdr_file, TRUE);
+            // File-lock support is negotiated; the helper tells us what the
+            // server will honour. Without it a file list can be read only while
+            // it is the live clipboard, which is fine but races a fast re-copy.
+            client->can_lock_clip_data =
+                (cliprdr_file_context_remote_get_flags(client->cliprdr_file) & CB_CAN_LOCK_CLIPDATA) != 0;
         }
+        // Remote -> Mac: FreeRDP wires a file-contents response handler only
+        // when it is built with FUSE, so this bridge answers for itself. The
+        // bytes are written to a temporary directory instead of being mounted,
+        // which is what a FUSE-less macOS client has to do.
+        cliprdr->ServerFileContentsResponse = krdp_cliprdr_server_file_contents_response;
     } else if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0) {
         RdpgfxClientContext* gfx = (RdpgfxClientContext*)e->pInterface;
         context->gfx = gfx;
@@ -981,6 +1317,7 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
                                 krdp_state_cb on_state,
                                 krdp_credentials_cb on_credentials,
                                 krdp_clipboard_cb on_clipboard,
+                                krdp_clipboard_files_cb on_clipboard_files,
                                 void* user)
 {
     if (!descriptor || !descriptor->host) return NULL;
@@ -1029,6 +1366,7 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     client->on_state = on_state;
     client->on_credentials = on_credentials;
     client->on_clipboard = on_clipboard;
+    client->on_clipboard_files = on_clipboard_files;
     client->user = user;
 
     client->instance = NULL;
@@ -1199,6 +1537,8 @@ void krdp_client_destroy(krdp_client* client)
         free(client->password);
     }
     DeleteCriticalSection(&client->clipboard_lock);
+    // Drop any half-downloaded files from a transfer.
+    krdp_clear_transfer(client, true);
     if (client->clipboard) {
         ClipboardDestroy(client->clipboard);
         client->clipboard = NULL;

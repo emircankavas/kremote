@@ -118,6 +118,9 @@ struct RDPClientView: NSViewRepresentable {
             client.onRemoteClipboardText = { [weak clipboard] text in
                 clipboard?.applyRemoteText(text)
             }
+            client.onRemoteClipboardFiles = { [weak clipboard] paths in
+                clipboard?.applyRemoteFiles(paths)
+            }
             clipboard.start()
             self.clipboard = clipboard
             self.client = client
@@ -244,6 +247,23 @@ final class RDPClipboardBridge {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+    }
+
+    /// Applies files the server copied out. The bytes have already been written
+    /// to disk by the bridge; the paths just go on the pasteboard as file URLs,
+    /// which is what Finder pastes from.
+    func applyRemoteFiles(_ paths: [String]) {
+        // Remember them so the poller does not re-announce what we just put there.
+        lastSentFiles = paths
+        guard ownsPasteboard else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        if !paths.isEmpty {
+            pasteboard.writeObjects(paths.map { URL(fileURLWithPath: $0) as NSURL })
+        }
+        // Files also clear any stale text representation, so a subsequent poll
+        // does not push an old string back to the server.
+        lastSentText = paths.isEmpty ? "" : nil
     }
 }
 
