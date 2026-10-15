@@ -37,6 +37,7 @@
 #include <freerdp/gdi/gfx.h>
 #include <freerdp/utils/cliprdr_utils.h>
 #include <winpr/user.h>   /* CF_UNICODETEXT / CF_TEXT */
+#include <winpr/clipboard.h> /* wClipboard: file list <-> FILEDESCRIPTORW */
 #include <winpr/shell.h>  /* FILEDESCRIPTORW */
 #include <winpr/file.h>   /* FILE_ATTRIBUTE_* */
 
@@ -112,6 +113,13 @@ struct krdp_client {
     /// lock/unlock and FILECONTENTS messages, and claims `cliprdr->custom`.
     /// Remote -> Mac is not supported: that path needs FUSE, absent here.
     CliprdrFileContext* cliprdr_file;
+    /// winpr clipboard backing the file format. Files are handed in as a
+    /// `text/uri-list`; winpr stats every path (descending into folders) and
+    /// produces the `FILEDESCRIPTORW` list a server pastes from. `clipboard_file_format_id`
+    /// is the id `FileGroupDescriptorW` is registered under, and is what the
+    /// format list must advertise — not a raw CF_HDROP.
+    wClipboard* clipboard;
+    UINT32 clipboard_file_format_id;
 
     freerdp* instance;
     HANDLE thread;
@@ -267,81 +275,67 @@ static krdp_client* krdp_client_from_cliprdr(CliprdrClientContext* ctx)
     return file ? (krdp_client*)cliprdr_file_context_get_context(file) : NULL;
 }
 
-/// Builds a `CLIPRDR_FILELIST` (MS-RDPECLIP 2.2.5.2.3) describing the currently
-/// advertised local files, or NULL when there are none. The caller frees it.
+/// Builds the `CLIPRDR_FILELIST` for the files currently on the clipboard, or NULL
+/// when there are none.
+///
+/// The conversion is winpr's job, not ours: the paths go in as a `text/uri-list`,
+/// winpr stats every entry (descending into folders, which is what a server
+/// expects) and produces the `FILEDESCRIPTORW` records, and FreeRDP serialises
+/// those. Hand-rolling descriptors from `stat(2)` gets the relative-path and
+/// folder semantics wrong, and the paste silently does nothing.
 static BYTE* krdp_build_file_list(krdp_client* client, UINT32* out_len)
 {
-    if (!client) return NULL;
+    if (!client || !client->clipboard || client->clipboard_file_count <= 0) return NULL;
+    if (client->clipboard_file_format_id == 0) return NULL;
 
-    EnterCriticalSection(&client->clipboard_lock);
-    const int count = client->clipboard_file_count;
-    if (count <= 0) {
-        LeaveCriticalSection(&client->clipboard_lock);
-        return NULL;
+    const UINT32 uriId = ClipboardGetFormatId(client->clipboard, "text/uri-list");
+    if (uriId == 0) return NULL;
+
+    // Assemble the URI list outside the lock, then hand it in.
+    size_t capacity = 16;
+    for (int i = 0; i < client->clipboard_file_count; i++) {
+        capacity += strlen(client->clipboard_files[i]) + 12;
+    }
+    char* uriList = calloc(1, capacity);
+    if (!uriList) return NULL;
+    for (int i = 0; i < client->clipboard_file_count; i++) {
+        strcat(uriList, "file://");
+        strcat(uriList, client->clipboard_files[i]);
+        strcat(uriList, "\r\n");
     }
 
-    FILEDESCRIPTORW* descriptors = calloc((size_t)count, sizeof(FILEDESCRIPTORW));
-    int kept = 0;
-    for (int i = 0; i < count; i++) {
-        const char* path = client->clipboard_files[i];
-        FILE* f = fopen(path, "rb");
-        if (!f) continue;   // a file that vanished is simply not offered
-        long size = 0;
-        if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
-        fclose(f);
-        if (size < 0) size = 0;
-
-        FILEDESCRIPTORW* d = &descriptors[kept];
-        d->dwFlags = FD_ATTRIBUTES | FD_FILESIZE | FD_WRITESTIME;
-        d->dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
-        d->nFileSizeHigh = (DWORD)(((UINT64)size) >> 32);
-        d->nFileSizeLow = (DWORD)(((UINT64)size) & 0xFFFFFFFFu);
-
-        // Windows wants a bare name, not a path: the server decides the folder.
-        const char* base = strrchr(path, '/');
-        base = base ? base + 1 : path;
-        // Paths are UTF-8; FILEDESCRIPTORW wants UTF-16LE.
-        UINT32 ignored = 0;
-        BYTE* wide = krdp_utf8_to_utf16le(base, &ignored);
-        if (wide) {
-            size_t units = (ignored >= 2 ? ignored / 2 : 1) - 1;   // drop the NUL
-            if (units > 259) units = 259;
-            memcpy(d->cFileName, wide, units * 2);
-            d->cFileName[units] = 0;
-            free(wide);
+    BYTE* out = NULL;
+    ClipboardLock(client->clipboard);
+    if (ClipboardSetData(client->clipboard, uriId, uriList, (UINT32)strlen(uriList))) {
+        UINT32 descSize = 0;
+        FILEDESCRIPTORW* desc = ClipboardGetData(client->clipboard, client->clipboard_file_format_id, &descSize);
+        if (desc) {
+            const UINT32 count = descSize / sizeof(FILEDESCRIPTORW);
+            // Mirror the flags the server negotiated; it rejects a list whose
+            // format does not match what was agreed.
+            const UINT32 flags = cliprdr_file_context_remote_get_flags(client->cliprdr_file);
+            UINT32 outSize = 0;
+            if (cliprdr_serialize_file_list_ex(flags, desc, count, &out, &outSize) == CHANNEL_RC_OK) {
+                if (out_len) *out_len = outSize;
+            } else {
+                free(out);
+                out = NULL;
+            }
+            free(desc);
         }
-        kept++;
     }
-    LeaveCriticalSection(&client->clipboard_lock);
-
-    if (kept == 0) {
-        free(descriptors);
-        return NULL;
-    }
-    // Mirror the flags the server negotiated, as the reference client does; the
-    // server rejects a list whose format does not match what was agreed.
-    CliprdrFileContext* file = client->cliprdr_file;
-    const UINT32 flags = file ? cliprdr_file_context_remote_get_flags(file) : FD_UNICODE;
-    BYTE* serialized = NULL;
-    UINT32 length = 0;
-    const UINT status = cliprdr_serialize_file_list_ex(flags, descriptors,
-                                                       (UINT32)kept, &serialized, &length);
-    free(descriptors);
-    if (status != CHANNEL_RC_OK || !serialized) return NULL;
-    if (out_len) *out_len = length;
-    return serialized;
+    ClipboardUnlock(client->clipboard);
+    free(uriList);
+    return out;
 }
 
-/// Builds the `text/uri-list` body `cliprdr_file_context` expects and hands it
-/// over. That layer parses it into files, keeps the handles, and answers the
-/// lock/unlock and FILECONTENTS messages the server sends — work that has to live
-/// there rather than here, or the server waits on a reply nobody sends.
+/// Pushes the file list into FreeRDP's file context, which needs the same
+/// `text/uri-list` to serve the bytes later: it walks the folders itself and
+/// matches the server's list index against its own.
 static void krdp_update_file_context(krdp_client* client)
 {
-    if (!client || !client->cliprdr_file) return;
+    if (!client || !client->cliprdr_file || client->clipboard_file_count <= 0) return;
 
-    // A URI list, one `file://…` per line. This is the format FreeRDP's file
-    // context parses (`cliprdr_local_stream_update`).
     size_t capacity = 16;
     for (int i = 0; i < client->clipboard_file_count; i++) {
         capacity += strlen(client->clipboard_files[i]) + 12;
@@ -372,16 +366,14 @@ static UINT krdp_cliprdr_send_format_list(CliprdrClientContext* ctx, bool hasTex
         count++;
     }
     if (client && client->clipboard_file_count > 0 && client->cliprdr_file &&
+        client->clipboard_file_format_id != 0 &&
         (cliprdr_file_context_current_flags(client->cliprdr_file) & CB_STREAM_FILECLIP_ENABLED)) {
-        // Offer the file list by *name*, matching what the server advertised. The
-        // guard is the file-clip capability, not `has_local_support` — the latter
-        // is about pasting files *out* of the session and is FALSE without FUSE,
-        // which is not needed for Mac -> remote.
-        formats[count].formatId = CF_HDROP;
+        // The *registered* id for FileGroupDescriptorW, not a raw CF_HDROP: the
+        // server matches the format by name, and winpr's synthesizer (below) is
+        // what turns a URI list into a FILEDESCRIPTORW list under this id.
+        formats[count].formatId = client->clipboard_file_format_id;
         formats[count].formatName = (char*)krdp_file_descriptor_name;
         count++;
-        // Tell the helper a new client list is going out; without this its state
-        // for the previous list is never retired.
         cliprdr_file_context_notify_new_client_format_list(client->cliprdr_file);
     }
 
@@ -499,7 +491,8 @@ static UINT krdp_cliprdr_server_format_data_request(CliprdrClientContext* ctx,
         EnterCriticalSection(&client->clipboard_lock);
         if (client->clipboard_text) data = krdp_utf8_to_utf16le(client->clipboard_text, &length);
         LeaveCriticalSection(&client->clipboard_lock);
-    } else if (client && request->requestedFormatId == CF_HDROP) {
+    } else if (client && client->clipboard_file_format_id != 0 &&
+               request->requestedFormatId == client->clipboard_file_format_id) {
         // The packed file list answers the request for the file format; the
         // server then pulls each file's bytes through the file context, which
         // answers CB_FILECONTENTS_* on our behalf.
@@ -908,6 +901,17 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     krdp_client* client = calloc(1, sizeof(krdp_client));
     if (!client) return NULL;
     InitializeCriticalSection(&client->clipboard_lock);
+    // The file format lives in a winpr clipboard: paths go in as a URI list and
+    // winpr produces the FILEDESCRIPTORW list a server pastes from. Registering
+    // "FileGroupDescriptorW" gives us the id to advertise; a raw CF_HDROP is not
+    // what a server matches on.
+    client->clipboard = ClipboardCreate();
+    if (client->clipboard) {
+        // The id is assigned by winpr; `ClipboardGetFormatId` resolves it here and
+        // the synthesizer is installed lazily by that call.
+        client->clipboard_file_format_id =
+            ClipboardGetFormatId(client->clipboard, "FileGroupDescriptorW");
+    }
 
     client->host = krdp_strdup(descriptor->host);
     client->username = krdp_strdup(descriptor->username);
@@ -978,6 +982,13 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     // `krdp_channel_connected` installs (and `krdp_gfx_UpdateSurfaces` forwards
     // to Swift). Turning this on without that wiring is what made an earlier
     // release connect but draw nothing, so the hook must stay paired with it.
+    // Decode on the session thread. FreeRDP's codec thread pool races with the
+    // graphics pipeline's surface handling (a data race the reference macOS
+    // client hits too), and that race is what made the picture hitch even with a
+    // fast codec. Single-threaded decode is ample for one desktop.
+    freerdp_settings_set_uint32(s, FreeRDP_ThreadingFlags, THREADING_FLAGS_DISABLE_THREADS);
+    // Keep the full codec set: H.264/AVC444 where the server negotiates GFX caps
+    // >= v10, progressive/RemoteFX on older hosts (their only efficient codec).
     freerdp_settings_set_bool(s, FreeRDP_SupportGraphicsPipeline, TRUE);
     freerdp_settings_set_bool(s, FreeRDP_GfxH264, TRUE);
     // RemoteFX / progressive codec. Without this the pipeline sends only plain
@@ -1082,6 +1093,10 @@ void krdp_client_destroy(krdp_client* client)
         free(client->password);
     }
     DeleteCriticalSection(&client->clipboard_lock);
+    if (client->clipboard) {
+        ClipboardDestroy(client->clipboard);
+        client->clipboard = NULL;
+    }
     free(client->clipboard_text);
     for (int i = 0; i < client->clipboard_file_count; i++) free(client->clipboard_files[i]);
     free(client->clipboard_files);
