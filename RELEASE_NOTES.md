@@ -1,4 +1,4 @@
-## KRemote v1.7.7
+## KRemote v1.7.8
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -6,26 +6,23 @@ connection tree with folder credential inheritance and mRemoteNG
 
 ### Fixes
 
-**"Smart size" now applies on the first connection.** The pane lays out and asks
-for the window's size before the session's Display Control channel exists, and a
-size request sent before that channel is up was silently dropped — so the desktop
-stayed at whatever size the connection was made with until the window happened to
-be resized again. The request is now remembered and replayed the moment the
-channel connects, so the remote desktop matches the pane from the start.
+**The RDP desktop now matches the pane on the first connection (smart size).**
+The previous release made the bridge replay a size request once the Display
+Control channel came up, but the request itself was still being lost: the panel
+is created before SwiftUI has laid it out, so the connection starts at the
+1280×800 fallback, and the view's own `layout()` runs while the session object is
+still nil and is not triggered again until the window is resized by hand. The
+pane now sends its real size once the layout pass has settled, so the desktop
+takes the panel's size from the start. Verified against a live host with a
+standalone probe: 1280×720 → 1600×900 arrives as 1600×900.
 
 ### Changes
 
-**Tabs show the connection name only.** They used to prefer the title the remote
-shell pushed (an OSC escape), so two tabs of the same host could read differently
-from the connection the user actually opened. The connection's name is what is
-shown now. When the same connection is open more than once, each tab gets a
-trailing number — "web 1", "web 2" — so they can be told apart; a lone tab keeps
-a clean, unnumbered name.
+**Tabs are now to the *right* of the app title**, as asked — the title is drawn as
+the leading toolbar item and the tab strip follows it immediately.
 
-**Tabs moved to the left of the title bar**, immediately after the window controls
-and the app title, instead of sitting centred.
+All of v1.7.7 back to v1.6.0 is included.
 
-All of v1.7.6 back to v1.6.0 is included.
 
 
 

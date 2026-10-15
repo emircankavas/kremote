@@ -139,6 +139,21 @@ struct RDPClientView: NSViewRepresentable {
                 view: view,
                 size: size
             )
+
+            // Push the pane's real size once the current layout pass settles.
+            //
+            // `makeNSView` runs before SwiftUI has laid the view out, so at this
+            // point `bounds` is usually still zero and the session connects at the
+            // 1280x800 fallback. `RDPHostView.layout()` would correct it, but that
+            // fires while `client` is still nil (the view is laid out as it is
+            // inserted), and nothing re-triggers it until the window itself is
+            // resized — which is exactly why the desktop only matched the pane
+            // after a manual resize. Asking again here, after layout, closes that
+            // gap; the bridge replays the request when Display Control connects.
+            DispatchQueue.main.async { [weak view] in
+                guard let view, view.bounds.width > 0, view.bounds.height > 0 else { return }
+                client.resize(to: view.backingPixelSize)
+            }
         }
 
         func stop() {

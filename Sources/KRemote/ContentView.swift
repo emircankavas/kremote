@@ -17,16 +17,20 @@ struct ContentView: View {
         } detail: {
             DetailView()
         }
-        .navigationTitle("KRemote")
+        // The window title is drawn by the first toolbar item instead of by
+        // `navigationTitle`, so the tab strip can sit immediately to its right:
+        // `.navigation` (leading run) places items *before* the title and
+        // `.principal` centres them, neither of which is "just after the title".
+        .navigationTitle("")
         .toolbar {
-            // Tabs sit on the left, immediately after the window controls and the
-            // "KRemote" title, rather than centred or in a row of their own.
-            // `.navigation` is the leading toolbar run (where the sidebar toggle
-            // lives), so the strip starts at the left edge and trails rightwards.
+            ToolbarItem(placement: .navigation) {
+                Text("KRemote")
+                    .font(.headline)
+                    .padding(.trailing, 4)
+            }
             ToolbarItem(placement: .navigation) {
                 if !model.sessions.isEmpty {
                     TabStrip()
-                        .padding(.leading, 8)
                 }
             }
             // The session controls stay on the right.
