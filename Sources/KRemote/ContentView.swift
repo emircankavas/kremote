@@ -15,18 +15,20 @@ struct ContentView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 280, max: 460)
         } detail: {
-            VStack(spacing: 0) {
-                WindowHeader()
-                Divider()
-                DetailView()
+            DetailView()
+        }
+        .navigationTitle("KRemote")
+        .toolbar {
+            // Tabs centred in the window's title bar — the layout that worked.
+            ToolbarItem(placement: .principal) {
+                if !model.sessions.isEmpty {
+                    TabStrip()
+                }
+            }
+            ToolbarItemGroup(placement: .primaryAction) {
+                SessionToolbarItems()
             }
         }
-        // The window title is drawn by `WindowHeader` inside the detail area, not
-        // by the system toolbar. A `.navigation` item on a NavigationSplitView
-        // lands in the *sidebar column's* title area, which put the tabs inside
-        // that pill and exposed the system toolbar's own customisation menu on
-        // right-click — neither of which is wanted here.
-        .navigationTitle("")
         .sheet(item: $model.editingNodeID) { id in
             ConnectionEditorView(nodeID: id) { model.editingNodeID = nil }
         }
@@ -85,34 +87,6 @@ struct ContentView: View {
 /// Lets `sheet(item:)` accept a plain `UUID` node id.
 extension UUID: @retroactive Identifiable {
     public var id: UUID { self }
-}
-
-/// The app's single header row: title, session tabs, and the session controls.
-///
-/// With `.windowStyle(.hiddenTitleBar)` there is no system bar, so this is the
-/// only row above the sessions — it must lay out the whole thing, including the
-/// inset that keeps it clear of the traffic-light buttons that float over its
-/// leading edge.
-struct WindowHeader: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        HStack(spacing: 12) {
-            // Clears the traffic lights (they hover over this row).
-            Spacer().frame(width: 70)
-            Text("KRemote")
-                .font(.headline)
-                .layoutPriority(1)
-            if !model.sessions.isEmpty {
-                TabStrip()
-            }
-            Spacer(minLength: 0)
-            SessionToolbarItems()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.bar)
-    }
 }
 
 /// The `#` (become root) and split-view controls, shown in the window title bar.
