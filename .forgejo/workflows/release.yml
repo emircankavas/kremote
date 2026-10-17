@@ -180,15 +180,25 @@ jobs:
           mv /tmp/notes.md RELEASE_NOTES.md
 
       - name: Publish release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: KRemote ${{ steps.version.outputs.tag }}
-          body_path: RELEASE_NOTES.md
-          # Release notes are the curated file from the repository, not a raw
-          # commit dump.
-          generate_release_notes: false
-          fail_on_unmatched_files: true
-          files: |
-            KRemote-${{ steps.version.outputs.version }}.dmg
-            KRemote-${{ steps.version.outputs.version }}.zip
+        # softprops/action-gh-release is not published on data.forgejo.org, and
+        # the gh CLI does not speak Forgejo's API. Use the release API directly.
+        env:
+          TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.version.outputs.tag }}'
+          VERSION='${{ steps.version.outputs.version }}'
+          API=https://forgejo.kavas.dev/api/v1/repos/emircan/kremote
+
+          python3 -c 'import json,sys; print(json.dumps({"tag_name":sys.argv[1],"name":"KRemote "+sys.argv[1],"body":open("RELEASE_NOTES.md").read()}))' "$TAG" > release.json
+          ID=$(curl -sS -X POST -H "Authorization: token $TOKEN" \
+            -H 'Content-Type: application/json' --data @release.json "$API/releases" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+          echo "release id=$ID"
+
+          for f in "KRemote-$VERSION.dmg" "KRemote-$VERSION.zip"; do
+            [ -f "$f" ] || { echo "missing asset $f"; exit 1; }
+            curl -sS -X POST -H "Authorization: token $TOKEN" \
+              -F "attachment=@$f" "$API/releases/$ID/assets?name=$f" >/dev/null
+            echo "uploaded $f"
+          done
