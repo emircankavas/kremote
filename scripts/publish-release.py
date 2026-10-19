@@ -44,6 +44,9 @@ class Client:
                 raw=False, allow=(200, 201, 202)):
         url = path if path.startswith("http") else API + path
         hdrs = {"Authorization": f"token {self.token}"}
+        # Cloudflare in front of forgejo.kavas.dev rejects urllib's default
+        # "Python-urllib/3.x" agent with a 403 (error code 1010).
+        hdrs["User-Agent"] = "KRemote-release/1.0"
         if body is not None:
             data = json.dumps(body).encode()
             hdrs["Content-Type"] = "application/json"
