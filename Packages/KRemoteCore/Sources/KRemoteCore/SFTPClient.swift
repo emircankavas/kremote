@@ -152,7 +152,16 @@ public final class SFTPClient: @unchecked Sendable {
     // MARK: - Elevation wrapper
 
     /// Runs `operation` on the current transport; on a permission failure, asks
-    /// the elevation provider for a privileged transport and runs it once more.
+    /// the elevation provider for a privileged transport and runs the *same*
+    /// operation once more on it.
+    ///
+    /// Exactly one elevated attempt per operation — never a loop:
+    /// * no provider, no sudo flag or no usable password → the original
+    ///   `permissionDenied` is rethrown untouched;
+    /// * the elevated channel cannot be started (sudo refused) → the provider's
+    ///   `elevationFailed` surfaces and nothing else is tried;
+    /// * the elevated channel starts but refuses the operation too → that is
+    ///   reported as `elevationFailed` so the UI shows the server's own words.
     private func perform<T>(
         path: String,
         _ operation: (SFTPClient) async throws -> T
@@ -164,14 +173,40 @@ public final class SFTPClient: @unchecked Sendable {
                   let elevated = await elevation.elevatedTransport(for: path) else {
                 throw SFTPError.status(code, message: message)
             }
-            try? await elevated.open()
+            // Starting the channel reports sudo's own complaint; the client adds
+            // nothing and does not retry.
+            try await elevated.open()
             let privileged = SFTPClient(transport: elevated)
             privileged.isElevated = true
-            try await privileged.handshake()
             defer { privileged.disconnect() }
-            return try await operation(privileged)
+            do {
+                try await privileged.handshake()
+                return try await operation(privileged)
+            } catch let error as SFTPError {
+                if case .status(.permissionDenied, _) = error {
+                    throw SFTPError.elevationFailed(
+                        Self.failureFromElevatedAttempt(transport: elevated, underlying: error)
+                    )
+                }
+                throw error
+            }
         }
     }
+
+    /// Builds the one failure the UI shows for a refused elevated attempt: the
+    /// server's stderr when sudo said anything, otherwise the SFTP message.
+    private static func failureFromElevatedAttempt(
+        transport: SFTPTransport,
+        underlying: SFTPError
+    ) -> ElevationFailure {
+        let stderr = transport.stderrText().trimmingCharacters(in: .whitespacesAndNewlines)
+        if !stderr.isEmpty { return ElevationFailure(stderr: stderr) }
+        if case .status(_, let message) = underlying, !message.isEmpty {
+            return ElevationFailure(kind: .unknown, stderr: message)
+        }
+        return ElevationFailure(kind: .unknown, stderr: "")
+    }
+
 
     /// Version exchange on an already-started transport (used by the elevated
     /// client, whose `connect()` would spawn again).

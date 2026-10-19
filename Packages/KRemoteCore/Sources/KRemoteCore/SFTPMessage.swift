@@ -163,6 +163,9 @@ public enum SFTPError: Error, Sendable, Equatable {
     case transport(String)
     /// The operation was attempted with an unusable path or handle.
     case invalidArgument(String)
+    /// The sudo attempt failed. `stderr` is the server's own text, verbatim, and
+    /// never contains the password (which only ever travels on stdin).
+    case elevationFailed(ElevationFailure)
 }
 
 extension SFTPError: LocalizedError {
@@ -184,6 +187,9 @@ extension SFTPError: LocalizedError {
         case .connectionClosed(let why): return "SFTP connection closed: \(why)"
         case .transport(let why): return "Could not start SFTP: \(why)"
         case .invalidArgument(let why): return "Invalid argument: \(why)"
+        case .elevationFailed(let failure):
+            let detail = failure.stderr.isEmpty ? "" : " — \(failure.stderr)"
+            return "\(failure.kind.userFacingMessage)\(detail)"
         }
     }
 }

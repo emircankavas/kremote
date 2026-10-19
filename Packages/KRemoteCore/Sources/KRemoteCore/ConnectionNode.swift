@@ -40,11 +40,17 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
     /// written to the JSON tree. `AppModel` mirrors it into the Keychain.
     public var password: String = ""
 
+    /// Whether a refused SFTP operation may be retried over `sudo`. Off by
+    /// default: elevation needs both this flag and a stored password, so a node
+    /// never starts spending sudo attempts because it happens to have one.
+    public var usesSudo: Bool = false
+
     public var children: [ConnectionNode]
 
     private enum CodingKeys: String, CodingKey {
         case id, kind, name, host, port, username, protocolName, children
         case identityFile, remoteCommand
+        case usesSudo
         case rdp
     }
 
@@ -60,6 +66,7 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
         remoteCommand: String = "",
         rdp: RDPSettings? = nil,
         password: String = "",
+        usesSudo: Bool = false,
         children: [ConnectionNode] = []
     ) {
         self.id = id
@@ -73,6 +80,7 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
         self.remoteCommand = remoteCommand
         self.rdp = rdp
         self.password = password
+        self.usesSudo = usesSudo
         self.children = children
     }
 
@@ -91,6 +99,7 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
         self.protocolName = try container.decodeIfPresent(String.self, forKey: .protocolName) ?? ""
         self.identityFile = try container.decodeIfPresent(String.self, forKey: .identityFile) ?? ""
         self.remoteCommand = try container.decodeIfPresent(String.self, forKey: .remoteCommand) ?? ""
+        self.usesSudo = try container.decodeIfPresent(Bool.self, forKey: .usesSudo) ?? false
         // A malformed `rdp` block must not sink the whole tree — fall back to nil.
         self.rdp = (try? container.decodeIfPresent(RDPSettings.self, forKey: .rdp)) ?? nil
         // Passwords live in the Keychain, never in the tree file.
@@ -109,6 +118,7 @@ public final class ConnectionNode: Identifiable, Codable, Hashable {
         try container.encode(protocolName, forKey: .protocolName)
         try container.encode(identityFile, forKey: .identityFile)
         try container.encode(remoteCommand, forKey: .remoteCommand)
+        if usesSudo { try container.encode(true, forKey: .usesSudo) }
         if let rdp, !rdp.isEmpty { try container.encode(rdp, forKey: .rdp) }
         try container.encode(children, forKey: .children)
     }
