@@ -60,6 +60,13 @@ struct SFTPWindowView: View {
     @State private var sortAscending = true
     @State private var goToPath = ""
     @State private var isGoToPresented = false
+    @State private var isNewFolderPresented = false
+    @State private var newFolderName = "untitled folder"
+    @State private var renameTarget: RemoteEntry?
+    @State private var renameDraft = ""
+    @State private var deleteTarget: [RemoteEntry] = []
+    @State private var isDeletePresented = false
+    @State private var permissionsTarget: RemoteEntry?
 
     private var viewMode: SFTPViewMode {
         get { SFTPViewMode(rawValue: viewModeRaw) ?? .list }
@@ -95,6 +102,40 @@ struct SFTPWindowView: View {
         )
         .onChange(of: session.path) { _, _ in selection = nil }
         .sheet(isPresented: $isGoToPresented) { goToSheet }
+        .sheet(item: $permissionsTarget) { entry in
+            SFTPPermissionsSheet(entries: [entry], session: session) { _ in
+                permissionsTarget = nil
+            }
+        }
+        .alert("New Folder", isPresented: $isNewFolderPresented) {
+            TextField("Name", text: $newFolderName)
+            Button("Cancel", role: .cancel) {}
+            Button("Create") {
+                let name = newFolderName
+                Task { await session.createFolder(named: name) }
+            }
+        } message: {
+            Text("Create a folder in \(session.path).")
+        }
+        .alert("Rename", isPresented: renamePresented, presenting: renameTarget) { entry in
+            TextField("Name", text: $renameDraft)
+            Button("Cancel", role: .cancel) {}
+            Button("Rename") {
+                let name = renameDraft
+                Task { await session.rename(entry, to: name) }
+            }
+        } message: { entry in
+            Text("Rename \(entry.name).")
+        }
+        .confirmationDialog(deleteTitle, isPresented: $isDeletePresented, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                let entries = deleteTarget
+                Task { await session.delete(entries) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This cannot be undone.")
+        }
     }
 
     // MARK: - Toolbar
@@ -151,6 +192,30 @@ struct SFTPWindowView: View {
             .help(showHidden ? "Hide hidden files (⇧⌘.)" : "Show hidden files (⇧⌘.)")
             .accessibilityLabel(showHidden ? "Hide hidden files" : "Show hidden files")
             .keyboardShortcut(".", modifiers: [.command, .shift])
+
+            Button { download(nil) } label: {
+                Image(systemName: "arrow.down.circle")
+            }
+            .help("Download the selected item (⌘D)")
+            .accessibilityLabel("Download")
+            .keyboardShortcut("d", modifiers: .command)
+            .disabled(selection == nil)
+
+            Button { upload() } label: {
+                Image(systemName: "arrow.up.circle")
+            }
+            .help("Upload files into this folder (⌘U)")
+            .accessibilityLabel("Upload")
+            .keyboardShortcut("u", modifiers: .command)
+            .disabled(!session.isConnected)
+
+            Button { beginNewFolder() } label: {
+                Image(systemName: "folder.badge.plus")
+            }
+            .help("New Folder (⇧⌘N)")
+            .accessibilityLabel("New Folder")
+            .keyboardShortcut("n", modifiers: [.command, .shift])
+            .disabled(!session.isConnected)
 
             Picker("View", selection: Binding(get: { viewMode }, set: { viewMode = $0 })) {
                 ForEach(SFTPViewMode.allCases) { mode in
@@ -235,10 +300,51 @@ struct SFTPWindowView: View {
 
     @ViewBuilder
     private var content: some View {
+        VStack(spacing: 0) {
+            if let message = session.errorMessage, !rows.isEmpty {
+                errorBanner(message)
+            }
+            contentBody
+            SFTPTransferPanel(session: session)
+        }
+    }
+
+    /// A message that stays above a usable listing: the server's reason for the
+    /// folder it refused, without hiding the folder you are still in. The old
+    /// inline version flashed and vanished because the successful reload cleared
+    /// it one runloop later.
+    private func errorBanner(_ message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+            Text(message)
+                .font(.callout)
+                .lineLimit(3)
+                .textSelection(.enabled)
+            Spacer(minLength: 8)
+            Button {
+                session.errorMessage = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
+            .accessibilityLabel("Dismiss the message")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Color.orange.opacity(0.12))
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    @ViewBuilder
+    private var contentBody: some View {
         ZStack {
             if session.isConnecting || (session.isLoading && !session.isConnected) {
                 connectingView
-            } else if let message = session.errorMessage {
+            } else if let message = session.errorMessage, rows.isEmpty {
                 errorView(message)
             } else if session.isLoading && session.entries.isEmpty {
                 ProgressView("Loading \(session.path)…")
@@ -493,6 +599,34 @@ struct SFTPWindowView: View {
         .background(.bar)
     }
 
+    // MARK: - Prompts
+
+    private var renamePresented: Binding<Bool> {
+        Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })
+    }
+
+    private var deleteTitle: String {
+        if deleteTarget.count == 1, let only = deleteTarget.first {
+            return "Delete “\(only.name)”?"
+        }
+        return "Delete \(deleteTarget.count) items?"
+    }
+
+    private func beginNewFolder() {
+        newFolderName = "untitled folder"
+        isNewFolderPresented = true
+    }
+
+    private func beginRename(_ entry: RemoteEntry) {
+        renameDraft = entry.name
+        renameTarget = entry
+    }
+
+    private func confirmDelete(_ entries: [RemoteEntry]) {
+        deleteTarget = entries
+        isDeletePresented = true
+    }
+
     // MARK: - Actions
 
     /// Picking a row: selection is shared with the session so Return knows what
@@ -524,11 +658,81 @@ struct SFTPWindowView: View {
     private func rowMenu(_ entry: RemoteEntry) -> some View {
         if entry.isDirectory {
             Button("Open") { open(entry) }
+            Button("Download Folder…") { download([entry]) }
+        } else {
+            Button("Download…") { download([entry]) }
         }
+        Divider()
+        Button("Rename…") { beginRename(entry) }
+        Button("Delete", role: .destructive) { confirmDelete([entry]) }
+        Button("Permissions…") { permissionsTarget = entry }
+        Divider()
         Button("Copy Path") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(entry.path, forType: .string)
         }
+    }
+
+    /// The rows the current selection names.
+    private var selectedEntries: [RemoteEntry] {
+        guard let selection else { return [] }
+        return rows.filter { $0.path == selection }
+    }
+
+    /// Downloads the selection, or an explicit set supplied by a row menu.
+    ///
+    /// One file gets a save panel; a folder tree or several items get a
+    /// destination folder. An existing local name is never silently overwritten.
+    private func download(_ explicit: [RemoteEntry]?) {
+        let entries = explicit ?? selectedEntries
+        guard !entries.isEmpty else { return }
+
+        if entries.count == 1, let entry = entries.first, !entry.isDirectory {
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = entry.name
+            panel.canCreateDirectories = true
+            panel.title = "Download \(entry.name)"
+            panel.prompt = "Download"
+            guard panel.runModal() == .OK, let destination = panel.url else { return }
+            session.enqueueDownload([(entry: entry, destination: destination)])
+            return
+        }
+
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.prompt = "Download Here"
+        panel.message = entries.count == 1
+            ? "Choose where to save \(entries.first?.name ?? "the folder")"
+            : "Choose where to save \(entries.count) items"
+        guard panel.runModal() == .OK, let directory = panel.url else { return }
+
+        let resolved = entries.map { entry -> (entry: RemoteEntry, destination: URL) in
+            var destination = directory.appendingPathComponent(entry.name)
+            var copy = 2
+            while FileManager.default.fileExists(atPath: destination.path) {
+                let base = (entry.name as NSString).deletingPathExtension
+                let ext = (entry.name as NSString).pathExtension
+                destination = directory.appendingPathComponent(
+                    base + " \(copy)" + (ext.isEmpty ? "" : ".\(ext)")
+                )
+                copy += 1
+            }
+            return (entry, destination)
+        }
+        session.enqueueDownload(resolved)
+    }
+
+    private func upload() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Upload"
+        panel.message = "Choose files or folders to upload into \(session.path)"
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        session.enqueueUpload(panel.urls)
     }
 
     private var goToSheet: some View {

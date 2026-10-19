@@ -167,7 +167,10 @@ final class SFTPSession: Identifiable {
             let listing = try await client.list(path)
             guard token == loadToken else { return }
             entries = listing
-            errorMessage = nil
+            // Deliberately does not clear `errorMessage`: after a refused folder
+            // the browser returns to the previous one and reloads it, and the
+            // successful reload used to erase the reason a runloop later. The
+            // message is cleared when a *new* navigation starts, or dismissed.
         } catch {
             guard token == loadToken else { return }
             entries = []
@@ -212,6 +215,7 @@ final class SFTPSession: Identifiable {
             target = SFTPClient.join(path, trimmed)
         }
         let previous = path
+        errorMessage = nil
         visit(target)
         await load()
         // A directory that could not be read must not leave the browser sitting
