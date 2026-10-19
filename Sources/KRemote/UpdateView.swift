@@ -8,14 +8,25 @@ struct UpdateView: View {
     @State private var phase: Phase = .checking
     @State private var info: UpdateInfo?
     @State private var message: String?
+    /// Which release line to follow. Persisted by `UpdateChecker.channel`.
+    @State private var channel: UpdateChannel = UpdateChecker.channel
 
     enum Phase { case checking, upToDate, available, installing, done, failed }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            HStack(spacing: 10) {
                 Text("Software Update").font(.headline)
                 Spacer()
+                Picker("Channel", selection: $channel) {
+                    ForEach(UpdateChannel.allCases, id: \.self) { channel in
+                        Text(channel.displayName).tag(channel)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 150)
+                .help("Beta receives pre-release builds. Stable only sees finished releases.")
                 if phase != .installing {
                     Button("Close") { dismiss() }
                 }
@@ -29,6 +40,10 @@ struct UpdateView: View {
         }
         .frame(width: 560, height: 460)
         .task { await check() }
+        .onChange(of: channel) { _, newValue in
+            UpdateChecker.channel = newValue
+            Task { await check() }
+        }
     }
 
     @ViewBuilder
@@ -100,13 +115,18 @@ struct UpdateView: View {
 
     private func check() async {
         phase = .checking
+        info = nil
+        message = nil
         do {
-            if let result = try await UpdateChecker.check() {
+            if let result = try await UpdateChecker.check(channel: channel) {
                 info = result
                 phase = result.isNewer ? .available : .upToDate
             } else {
                 info = nil
                 phase = .failed
+                message = channel == .beta
+                    ? "No beta build has been published yet."
+                    : "No release has been published yet."
             }
         } catch {
             phase = .failed

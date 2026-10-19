@@ -54,14 +54,25 @@ done
 mkdir -p "$WORK"
 cd "$WORK"
 
-if [ ! -d "FreeRDP-$FREERDP_VERSION" ]; then
-    echo "==> Fetching FreeRDP $FREERDP_VERSION"
-    curl -fsSL -o "freerdp-$FREERDP_VERSION.tar.gz" \
-        "https://github.com/FreeRDP/FreeRDP/archive/refs/tags/$FREERDP_VERSION.tar.gz"
-    tar xzf "freerdp-$FREERDP_VERSION.tar.gz"
+# Mirrored on the self-hosted Forgejo: no GitHub dependency in the build. Forgejo
+# unpacks the archive as `freerdp/` (GitHub's endpoint used `FreeRDP-<version>/`),
+# so the extracted directory is located by name rather than assumed.
+FREERDP_MIRROR="${FREERDP_MIRROR:-https://forgejo.kavas.dev/emircan/FreeRDP}"
+SRC="$WORK/FreeRDP-src-$FREERDP_VERSION"
+if [ ! -d "$SRC" ]; then
+    echo "==> Fetching FreeRDP $FREERDP_VERSION from $FREERDP_MIRROR"
+    rm -rf "$SRC" "$WORK/.unpack"
+    mkdir -p "$WORK/.unpack"
+    curl -fsSL -o "$WORK/freerdp-$FREERDP_VERSION.tar.gz" \
+        "$FREERDP_MIRROR/archive/refs/tags/$FREERDP_VERSION.tar.gz"
+    tar xzf "$WORK/freerdp-$FREERDP_VERSION.tar.gz" -C "$WORK/.unpack"
+    # The archive holds exactly one top-level directory, whatever it is called.
+    inner="$(find "$WORK/.unpack" -maxdepth 1 -mindepth 1 -type d | head -1)"
+    [ -n "$inner" ] || { echo "Archive had no top-level directory" >&2; exit 1; }
+    mv "$inner" "$SRC"
+    rm -rf "$WORK/.unpack"
 fi
 
-SRC="$WORK/FreeRDP-$FREERDP_VERSION"
 BUILD="$WORK/build"
 mkdir -p "$BUILD"
 
