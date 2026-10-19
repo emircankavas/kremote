@@ -33,6 +33,18 @@ public protocol ElevationProvider: AnyObject, Sendable {
     func elevatedTransport(for path: String) async -> SFTPTransport?
 }
 
+/// Optional refinement: a provider that can say up front whether it *would*
+/// elevate. The window uses this to word a permission failure honestly ("enable
+/// sudo on this connection" versus "sudo was tried and refused") instead of
+/// guessing from the error alone.
+///
+/// Not a requirement of `ElevationProvider`, so a provider that only implements
+/// the one method keeps working.
+public protocol ElevationCapabilityReporting: AnyObject, Sendable {
+    /// True when a refused operation would be retried over an elevated channel.
+    var isElevationAvailable: Bool { get }
+}
+
 /// Speaks SFTP v3 over an injectable transport.
 ///
 /// Requests are serialised: one in flight at a time, matched by request id. That
