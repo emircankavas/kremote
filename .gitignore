@@ -31,3 +31,6 @@ Package.resolved
 
 # Local secrets
 *.local.xcconfig
+
+# Worker scratch (transient)
+.scratch/
