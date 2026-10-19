@@ -171,6 +171,9 @@ extension SFTPClient {
     ) async throws -> Int64 {
         let target = Self.normalise(remotePath)
         let partPath = Self.remotePartPath(target)
+        // Fail on an unreadable local file before touching the server: a missing
+        // source should not create and then delete a temp file on the remote side.
+        _ = try FileManager.default.attributesOfItem(atPath: localURL.path)
         do {
             let written = try await uploadChunks(
                 localURL, to: partPath, progress: progress, isCancelled: isCancelled
@@ -481,17 +484,30 @@ extension SFTPClient {
 
     /// The `.part` sibling of a local target. Kept next to the target, not in
     /// /tmp, so the final rename is a same-volume move and cannot half-copy.
-    static func partURL(for url: URL) -> URL {
+    ///
+    /// Public because it is part of the transfer's contract: a cancelled download
+    /// leaves nothing here, and a caller that wants to show the temporary file (or
+    /// clean up after a crash) needs the same name this code uses.
+    public static func partURL(for url: URL) -> URL {
         url.deletingLastPathComponent()
             .appendingPathComponent(".\(url.lastPathComponent).part")
     }
 
     /// The `.part` sibling of a remote target, hidden so a listing does not show
     /// a transfer in progress next to a file of the same name.
+    ///
+    /// Kept relative when the target is relative: `parent(of:)` normalises to an
+    /// absolute path, which would silently move the temporary file to `/` and
+    /// leave the real target never created.
     static func remotePartPath(_ path: String) -> String {
-        let directory = parent(of: path)
-        let name = (normalise(path) as NSString).lastPathComponent
-        return join(directory, ".\(name).part")
+        let normalised = normalise(path)
+        let name = (normalised as NSString).lastPathComponent
+        let partName = ".\(name).part"
+        guard normalised.hasPrefix("/") else {
+            let directory = (normalised as NSString).deletingLastPathComponent
+            return directory.isEmpty || directory == "." ? partName : directory + "/" + partName
+        }
+        return join(parent(of: normalised), partName)
     }
 
     /// Removes a local file if it is there, never throwing: this runs on cleanup

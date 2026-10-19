@@ -82,7 +82,7 @@ struct ConnectionEditorView: View {
                                 .help("Stored in the macOS Keychain, never written to disk as plain text.")
                         }
                         Section("SFTP") {
-                            Toggle("Use sudo for refused file operations", isOn: $draft.usesSudo)
+                            Toggle("Retry refused file operations with sudo", isOn: $draft.usesSudo)
                                 .help(
                                     """
                                     When a file operation is refused, KRemote retries it once over a \
@@ -90,7 +90,7 @@ struct ConnectionEditorView: View {
                                     Needs the password above; it is written to sudo's stdin and never logged.
                                     """
                                 )
-                            Text("Off by default. Only the refused operation is retried; the rest of the session stays unprivileged.")
+                            Text("On by default. Needs the password above and sudo rights on the server. Only the refused operation is retried over a second connection; the rest of the session stays unprivileged.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

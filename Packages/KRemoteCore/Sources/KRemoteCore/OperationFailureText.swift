@@ -44,18 +44,20 @@ public enum OperationFailureText {
     /// when the failure was a refusal.
     public static func message(for error: Error, context: Context) -> String {
         let server = describe(error)
-        guard isPermissionDenied(error) else { return server }
 
-        // An `elevationFailed` already carries the elevated channel's own text,
-        // so the retry did happen and its outcome is the whole story.
+        // An `elevationFailed` carries the elevated channel's own text, so the
+        // retry *did* happen and its outcome is the whole story — it must be
+        // reported as such even though it is not itself a `.permissionDenied`.
         if case .elevationFailed = error as? SFTPError ?? .invalidArgument("") {
             return server + "\n\nSudo elevation was attempted and did not succeed, so the operation was not retried again."
         }
 
+        guard isPermissionDenied(error) else { return server }
+
         if let reason = context.unavailableReason {
             return server + "\n\n" + reason
         }
-        // Its own type rather than a phrase: the alert for a refused operation
+        // Its own sentence rather than a phrase: the alert for a refused operation
         // always names what happened to the elevation attempt.
         return server + "\n\nSudo elevation was not successful for this item; it was retried once as root and refused again."
     }

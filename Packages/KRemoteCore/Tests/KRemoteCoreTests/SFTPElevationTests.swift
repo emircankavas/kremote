@@ -202,9 +202,13 @@ final class SFTPElevationTests: XCTestCase {
 
     // MARK: The node flag
 
-    func testUsesSudoFlagRoundTripsAndDefaultsToOff() throws {
+    /// Elevation is automatic: the user asked for "retry with sudo if a password
+    /// is stored", so the flag defaults ON and a node written before the flag
+    /// existed is treated as ON too. The retry itself still requires a stored
+    /// password and real sudo rights.
+    func testUsesSudoFlagDefaultsToOnAndRoundTrips() throws {
         let node = ConnectionNode(kind: .connection, name: "web", host: "h")
-        XCTAssertFalse(node.usesSudo, "a node never elevates unless it opted in")
+        XCTAssertTrue(node.usesSudo, "elevation is attempted by default")
 
         node.usesSudo = true
         let encoded = try JSONEncoder().encode(node)
@@ -212,16 +216,25 @@ final class SFTPElevationTests: XCTestCase {
         XCTAssertTrue(decoded.usesSudo)
 
         // An existing tree written before the flag existed must still load, with
-        // elevation off and no password anywhere in the file.
+        // elevation on and no password anywhere in the file.
         var json = try XCTUnwrap(
             JSONSerialization.jsonObject(with: encoded) as? [String: Any]
         )
         json.removeValue(forKey: "usesSudo")
         let legacy = try JSONSerialization.data(withJSONObject: json)
         let loaded = try JSONDecoder().decode(ConnectionNode.self, from: legacy)
-        XCTAssertFalse(loaded.usesSudo)
+        XCTAssertTrue(loaded.usesSudo)
         XCTAssertEqual(loaded.id, node.id)
         XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("usesSudo\":false"))
+
+        // An explicit opt-out still round-trips.
+        node.usesSudo = false
+        let off = try JSONDecoder().decode(
+            ConnectionNode.self,
+            from: JSONEncoder().encode(node)
+        )
+        XCTAssertFalse(off.usesSudo, "an explicit opt-out must be respected")
+        node.usesSudo = true
 
         // The draft carries it through the editor.
         let draft = ConnectionDraft(from: node)
