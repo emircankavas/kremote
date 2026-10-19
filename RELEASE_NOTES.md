@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 11
+## KRemote 1.8.0 beta 12
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -17,6 +17,19 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### Fixed: sudo could not find sftp-server
+
+beta 11 invented an `sshd -i -s sftp` invocation to reach the built-in SFTP
+server. `sshd` has no `-s` option, so the server replied with its usage text and
+nothing was elevated.
+
+The lookup now checks every distribution layout — including
+`/usr/libexec/openssh/sftp-server`, which RHEL, Fedora and Alma use and the old
+list missed — then `PATH`, then asks `sshd -T` for the subsystem path from the
+server's own effective configuration, and finally searches `/usr` and `/opt`. All
+of it runs as root inside the single `sudo`, and the whole command is checked
+against `sh -n` by a unit test.
 
 ### Fixed: the sudo retry never actually ran
 
@@ -158,7 +171,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.11 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.12 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not
