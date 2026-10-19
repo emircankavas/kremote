@@ -127,6 +127,11 @@ jobs:
       - name: Fail if the build reached GitHub
         run: |
           set -o pipefail
+          # A missing log would make grep fail and the guard pass silently, so
+          # require the resolver output to actually be there.
+          [ -s build.log ] || { echo "::error::build.log is missing or empty"; exit 1; }
+          grep -q "Resolved source packages:" build.log || {
+            echo "::error::no package resolution in build.log — the guard cannot prove anything"; exit 1; }
           if grep -E "^(Fetching from|Resolving|Creating working copy of package).*github\.com" build.log; then
             echo "::error::the build fetched a package from github.com"
             exit 1
