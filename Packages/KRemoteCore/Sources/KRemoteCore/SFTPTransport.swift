@@ -35,8 +35,13 @@ public protocol SFTPTransport: AnyObject, Sendable {
 /// A blocking `read()` on the writing queue would starve every request.
 public final class ProcessSFTPTransport: SFTPTransport, @unchecked Sendable {
     private let arguments: [String]
-    /// Extra arguments placed before the destination (e.g. `-p 2222`).
-    private let environment: [String: String]
+    /// Extra environment for the child (askpass variables live here).
+    private var environment: [String: String]
+    /// Password typed by ssh through our own askpass helper. Never appears in
+    /// argv — argv is world-readable through `ps`.
+    private let password: String
+    /// Temporary askpass script, removed on close.
+    private var askpassURL: URL?
 
     private let process = Process()
     private let inputPipe = Pipe()
@@ -51,9 +56,14 @@ public final class ProcessSFTPTransport: SFTPTransport, @unchecked Sendable {
     private let bufferLock = NSLock()
     private var readBuffer = Data()
 
-    public init(arguments: [String], environment: [String: String] = [:]) {
+    public init(
+        arguments: [String],
+        environment: [String: String] = [:],
+        password: String = ""
+    ) {
         self.arguments = arguments
         self.environment = environment
+        self.password = password
     }
 
     /// Builds the argv-style command from a connection's resolved settings.
@@ -61,22 +71,31 @@ public final class ProcessSFTPTransport: SFTPTransport, @unchecked Sendable {
     /// The same `ssh` options as the terminal path are used, so `~/.ssh/config`,
     /// keys, the agent and ProxyJump behave identically — but with `-T` and the
     /// subsystem instead of an interactive shell.
+    ///
+    /// `password` is typed by ssh through a generated `SSH_ASKPASS` helper.
+    /// There is no TTY on this connection (a terminal would corrupt the binary
+    /// protocol), so without askpass ssh has nowhere to read a password from and
+    /// dies with "ssh_askpass: exec(...): No such file or directory".
     public convenience init(
         host: String,
         port: Int,
         username: String,
         identityFile: String,
+        password: String = "",
         remoteCommand: String = "",
         extraOptions: [String] = []
     ) {
         var args = ["-T"]
-        args += ["-o", "NumberOfPasswordPrompts=1"]
+        args += ["-o", "NumberOfPasswordPrompts=2"]
         args += ["-o", "PreferredAuthentications=publickey,password,keyboard-interactive,gssapi-with-mic"]
         args += ["-o", "StrictHostKeyChecking=accept-new"]
         // Timeouts are ssh's job, not the caller's: a blocked pipe read cannot be
         // interrupted from Swift, so a black-holed host would hang the caller
         // forever. `ConnectTimeout` bounds the TCP/handshake wait;
         // `ServerAlive*` kills a live connection that stops answering.
+        args += ["-o", "ConnectTimeout=20"]
+        args += ["-o", "ServerAliveInterval=30"]
+        args += ["-o", "ServerAliveCountMax=3"]
         args += extraOptions
         if port > 0, port != 22 { args += ["-p", String(port)] }
         let key = identityFile.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -94,7 +113,7 @@ public final class ProcessSFTPTransport: SFTPTransport, @unchecked Sendable {
         } else {
             args.append(command)
         }
-        self.init(arguments: args)
+        self.init(arguments: args, password: password)
     }
 
     /// The full argv this transport will run, for logging/tests.
@@ -113,11 +132,29 @@ public final class ProcessSFTPTransport: SFTPTransport, @unchecked Sendable {
         // server quote its error text differently. The user's own env is kept.
         var env = ProcessInfo.processInfo.environment
         for (key, value) in environment { env[key] = value }
+
+        // ssh has no terminal here, so a password can only come from askpass.
+        // Without this, ssh tries /usr/X11R6/bin/ssh-askpass (absent on macOS)
+        // and the connection dies before the protocol even starts.
+        if !password.isEmpty {
+            do {
+                let helper = try Self.makeAskpassHelper(password: password)
+                askpassURL = helper
+                env["SSH_ASKPASS"] = helper.path
+                env["SSH_ASKPASS_REQUIRE"] = "force"
+                // ssh refuses askpass without a DISPLAY on some builds; the value
+                // is never used by the helper, it only satisfies the check.
+                env["DISPLAY"] = env["DISPLAY"] ?? ":0"
+            } catch {
+                throw SFTPError.transport("could not prepare the password helper: \(error.localizedDescription)")
+            }
+        }
         process.environment = env
 
         do {
             try process.run()
         } catch {
+            removeAskpassHelper()
             throw SFTPError.transport("could not start ssh: \(error.localizedDescription)")
         }
 
@@ -159,6 +196,45 @@ public final class ProcessSFTPTransport: SFTPTransport, @unchecked Sendable {
         if process.isRunning { process.terminate() }
         outputPipe.fileHandleForReading.closeFile()
         errorPipe.fileHandleForReading.closeFile()
+        removeAskpassHelper()
+    }
+
+    // MARK: - Askpass helper
+
+    /// Writes a tiny script that prints the password on stdout, which is exactly
+    /// what ssh expects from `SSH_ASKPASS`.
+    ///
+    /// The password lives in a 0700 directory with a 0700 file and is removed when
+    /// the session closes — never in argv, and never in the environment where a
+    /// sibling process could read it out of `/proc`-equivalent listings.
+    static func makeAskpassHelper(password: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kremote-askpass-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let script = directory.appendingPathComponent("askpass.sh")
+
+        // The password is passed as a base64 argument so quotes, newlines and
+        // backslashes in it cannot break the script or the shell.
+        let encoded = Data(password.utf8).base64EncodedString()
+        let body = """
+        #!/bin/sh
+        # KRemote's SSH_ASKPASS helper: print the stored password and nothing else.
+        printf '%s' '\(encoded)' | /usr/bin/base64 -D
+        """
+        try body.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        return script
+    }
+
+    private func removeAskpassHelper() {
+        guard let askpassURL else { return }
+        let directory = askpassURL.deletingLastPathComponent()
+        try? FileManager.default.removeItem(at: directory)
+        self.askpassURL = nil
     }
 
     // MARK: - IO

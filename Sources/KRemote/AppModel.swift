@@ -575,6 +575,10 @@ final class AppModel {
                 port: effective.port,
                 username: effective.username,
                 identityFile: effective.identityFile,
+                // Password auth needs the stored secret: there is no terminal on
+                // this connection, so ssh would otherwise fall back to a missing
+                // ssh-askpass and fail before the protocol starts.
+                password: effective.password,
                 // Timeouts belong to ssh: a blocked pipe read cannot be cancelled
                 // from Swift, so without these a black-holed host would leave the
                 // window on "Connecting…" forever. ConnectTimeout bounds the

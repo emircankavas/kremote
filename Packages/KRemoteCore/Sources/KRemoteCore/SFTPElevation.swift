@@ -548,12 +548,17 @@ public final class SudoElevationProvider: ElevationProvider, @unchecked Sendable
             let target = target
             let timeouts = timeouts
             self.factory = { remoteCommand, passwordLine in
-                SudoSFTPTransport(
+                // ssh itself authenticates with the same stored password (there is
+                // no terminal to prompt on), and the password is *also* written to
+                // stdin for sudo once the channel is up.
+                let loginPassword = String(decoding: passwordLine.dropLast(), as: UTF8.self)
+                return SudoSFTPTransport(
                     process: ProcessSFTPTransport(
                         host: target.host,
                         port: target.port,
                         username: target.username,
                         identityFile: target.identityFile,
+                        password: loginPassword,
                         remoteCommand: remoteCommand
                     ),
                     passwordLine: passwordLine,
