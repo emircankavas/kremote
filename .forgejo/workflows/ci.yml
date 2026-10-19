@@ -50,7 +50,7 @@ jobs:
           path: |
             ${{ runner.home }}/hermes-build/freerdp-install
             ${{ runner.home }}/hermes-build/freerdp-build
-          key: freerdp-${{ runner.os }}-${{ runner.arch }}-3.32.2-openh264
+          key: freerdp-${{ runner.os }}-${{ runner.arch }}-3.32.2-forgejo-layout
 
       - name: Build FreeRDP (permissive, OpenH264, no ffmpeg)
         run: |

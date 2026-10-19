@@ -76,6 +76,20 @@ fi
 BUILD="$WORK/build"
 mkdir -p "$BUILD"
 
+# A cached `build/` from an older layout (or an older script) records the source
+# directory in CMakeCache.txt, and cmake then refuses to configure a different
+# one. The cache is keyed on the FreeRDP version *and* the layout, but a local
+# rebuild must also recover, so the build tree is dropped when it points
+# somewhere else.
+if [ -f "$BUILD/CMakeCache.txt" ]; then
+    cached_src="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$BUILD/CMakeCache.txt" | head -1)"
+    if [ -n "$cached_src" ] && [ "$cached_src" != "$SRC" ]; then
+        echo "==> Discarding stale build tree (configured for $cached_src)"
+        rm -rf "$BUILD"
+        mkdir -p "$BUILD"
+    fi
+fi
+
 export PKG_CONFIG_PATH="$BREW_PREFIX/opt/openssl@4/lib/pkgconfig:$BREW_PREFIX/opt/openh264/lib/pkgconfig:$BREW_PREFIX/opt/jansson/lib/pkgconfig:$BREW_PREFIX/opt/uriparser/lib/pkgconfig:$BREW_PREFIX/opt/jpeg-turbo/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
 echo "==> Configuring"
