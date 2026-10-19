@@ -400,7 +400,7 @@ public final class SFTPClient: @unchecked Sendable {
         try await perform(path: target) { client in
             let reply = try await client.request(
                 type: .mkdir,
-                payload: SFTPRequests.pathOnly(target)
+                payload: SFTPRequests.mkdir(path: target, permissions: permissions)
             )
             try client.checkStatus(reply)
         }

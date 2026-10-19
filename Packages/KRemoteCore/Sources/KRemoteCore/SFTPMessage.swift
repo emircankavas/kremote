@@ -242,15 +242,24 @@ struct SFTPReader {
     }
 
     /// Reads an attributes block.
+    ///
+    /// The v3 flag layout is NOT the v4 one: `UIDGID` is a single bit carrying
+    /// both uid and gid, and `ACMODTIME` a single bit carrying both atime and
+    /// mtime. Using the v4 bits here desynchronises the stream after the first
+    /// entry — the server's timestamps then get read as string lengths.
     mutating func attributes() throws -> SFTPAttributes {
         let flags = try uint32()
         var attrs = SFTPAttributes()
         if flags & 0x0000_0001 != 0 { attrs.size = try uint64() }
-        if flags & 0x0000_0002 != 0 { attrs.uid = try uint32() }
-        if flags & 0x0000_0004 != 0 { attrs.gid = try uint32() }
-        if flags & 0x0000_0008 != 0 { attrs.permissions = try uint32() }
-        if flags & 0x0000_0010 != 0 { attrs.accessed = try timestamp() }
-        if flags & 0x0000_0020 != 0 { attrs.modified = try timestamp() }
+        if flags & 0x0000_0002 != 0 {
+            attrs.uid = try uint32()
+            attrs.gid = try uint32()
+        }
+        if flags & 0x0000_0004 != 0 { attrs.permissions = try uint32() }
+        if flags & 0x0000_0008 != 0 {
+            attrs.accessed = try timestamp()
+            attrs.modified = try timestamp()
+        }
         // 0x80000000 is the v3 "extended attributes" flag; the block is a list we
         // do not use, but it still has to be skipped to stay in sync.
         if flags & 0x8000_0000 != 0 {
@@ -299,18 +308,21 @@ struct SFTPWriter {
     mutating func attributes(_ attrs: SFTPAttributes) {
         var flags: UInt32 = 0
         if attrs.size != nil { flags |= 0x0000_0001 }
-        if attrs.uid != nil { flags |= 0x0000_0002 }
-        if attrs.gid != nil { flags |= 0x0000_0004 }
-        if attrs.permissions != nil { flags |= 0x0000_0008 }
-        if attrs.accessed != nil { flags |= 0x0000_0010 }
-        if attrs.modified != nil { flags |= 0x0000_0020 }
+        // v3 packs uid+gid into one flag and atime+mtime into another.
+        if attrs.uid != nil || attrs.gid != nil { flags |= 0x0000_0002 }
+        if attrs.permissions != nil { flags |= 0x0000_0004 }
+        if attrs.accessed != nil || attrs.modified != nil { flags |= 0x0000_0008 }
         uint32(flags)
         if let size = attrs.size { uint64(size) }
-        if let uid = attrs.uid { uint32(uid) }
-        if let gid = attrs.gid { uint32(gid) }
+        if flags & 0x0000_0002 != 0 {
+            uint32(attrs.uid ?? 0)
+            uint32(attrs.gid ?? 0)
+        }
         if let permissions = attrs.permissions { uint32(permissions) }
-        if let accessed = attrs.accessed { uint32(UInt32(max(0, accessed.timeIntervalSince1970))) }
-        if let modified = attrs.modified { uint32(UInt32(max(0, modified.timeIntervalSince1970))) }
+        if flags & 0x0000_0008 != 0 {
+            uint32(UInt32(max(0, (attrs.accessed ?? attrs.modified ?? Date()).timeIntervalSince1970)))
+            uint32(UInt32(max(0, (attrs.modified ?? attrs.accessed ?? Date()).timeIntervalSince1970)))
+        }
     }
 
     var data: Data { Data(bytes) }
@@ -421,6 +433,15 @@ public enum SFTPRequests {
     public static func pathOnly(_ path: String) -> [UInt8] {
         var writer = SFTPWriter()
         writer.string(path)
+        return writer.bytes
+    }
+
+    /// Mkdir carries an attributes block. An all-zero block is legal, but OpenSSH
+    /// applies the requested mode from it, so the mode is sent explicitly.
+    public static func mkdir(path: String, permissions: UInt16) -> [UInt8] {
+        var writer = SFTPWriter()
+        writer.string(path)
+        writer.attributes(SFTPAttributes(permissions: UInt32(permissions & 0o7777)))
         return writer.bytes
     }
 

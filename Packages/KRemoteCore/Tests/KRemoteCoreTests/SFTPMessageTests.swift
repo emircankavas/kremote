@@ -119,6 +119,28 @@ final class SFTPMessageTests: XCTestCase {
         XCTAssertFalse(SFTPAttributes().isDirectory)
     }
 
+    /// Guards the bug a real OpenSSH server exposed: v3 packs uid+gid under one
+    /// flag and atime+mtime under another. The v4 layout silently desynchronises
+    /// the stream, so the raw wire bytes are asserted here, not just a round-trip
+    /// through our own writer.
+    func testAttributesUseTheV3FlagLayout() throws {
+        var writer = SFTPWriter()
+        writer.uint32(0x0000_0001 | 0x0000_0002 | 0x0000_0008)  // size, uidgid, acmodtime
+        writer.uint64(99)        // size
+        writer.uint32(501)       // uid
+        writer.uint32(20)        // gid
+        writer.uint32(1_700_000_000) // atime
+        writer.uint32(1_700_000_100) // mtime
+
+        var reader = SFTPReader(writer.bytes)
+        let attrs = try reader.attributes()
+        XCTAssertEqual(attrs.size, 99)
+        XCTAssertEqual(attrs.uid, 501)
+        XCTAssertEqual(attrs.gid, 20)
+        XCTAssertEqual(attrs.modified?.timeIntervalSince1970, 1_700_000_100)
+        XCTAssertEqual(reader.remaining, 0, "the attributes block must consume exactly its bytes")
+    }
+
     func testExtendedAttributesBlockIsSkipped() throws {
         var writer = SFTPWriter()
         writer.uint32(0x8000_0000)    // extended flag
