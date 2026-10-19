@@ -122,7 +122,16 @@ jobs:
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO \
-            build
+            build 2>&1 | tee build.log
+
+      - name: Fail if the build reached GitHub
+        run: |
+          set -o pipefail
+          if grep -E "^(Fetching from|Resolving|Creating working copy of package).*github\.com" build.log; then
+            echo "::error::the build fetched a package from github.com"
+            exit 1
+          fi
+          echo "all packages resolved from Forgejo"
 
       - name: Verify the bundle was produced
         run: |
