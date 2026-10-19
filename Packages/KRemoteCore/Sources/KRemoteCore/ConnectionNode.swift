@@ -345,6 +345,8 @@ public struct ConnectionDraft: Equatable {
     public var identityFile: String
     public var remoteCommand: String
     public var password: String
+    /// The node's "use sudo for refused SFTP operations" flag.
+    public var usesSudo: Bool
     /// Directly-set RDP overrides; `nil` fields mean "inherit from the folder".
     public var rdp: RDPSettings
 
@@ -358,6 +360,7 @@ public struct ConnectionDraft: Equatable {
         identityFile: String = "",
         remoteCommand: String = "",
         password: String = "",
+        usesSudo: Bool = false,
         rdp: RDPSettings = RDPSettings()
     ) {
         self.id = id
@@ -369,6 +372,7 @@ public struct ConnectionDraft: Equatable {
         self.identityFile = identityFile
         self.remoteCommand = remoteCommand
         self.password = password
+        self.usesSudo = usesSudo
         self.rdp = rdp
     }
 
@@ -383,6 +387,7 @@ public struct ConnectionDraft: Equatable {
             identityFile: node.identityFile,
             remoteCommand: node.remoteCommand,
             password: node.password,
+            usesSudo: node.usesSudo,
             rdp: node.rdp ?? RDPSettings()
         )
     }

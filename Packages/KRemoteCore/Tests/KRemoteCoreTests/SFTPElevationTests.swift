@@ -200,6 +200,35 @@ final class SFTPElevationTests: XCTestCase {
         XCTAssertFalse(SudoElevationProvider.isUsable(password: "\n"))
     }
 
+    // MARK: The node flag
+
+    func testUsesSudoFlagRoundTripsAndDefaultsToOff() throws {
+        let node = ConnectionNode(kind: .connection, name: "web", host: "h")
+        XCTAssertFalse(node.usesSudo, "a node never elevates unless it opted in")
+
+        node.usesSudo = true
+        let encoded = try JSONEncoder().encode(node)
+        let decoded = try JSONDecoder().decode(ConnectionNode.self, from: encoded)
+        XCTAssertTrue(decoded.usesSudo)
+
+        // An existing tree written before the flag existed must still load, with
+        // elevation off and no password anywhere in the file.
+        var json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        json.removeValue(forKey: "usesSudo")
+        let legacy = try JSONSerialization.data(withJSONObject: json)
+        let loaded = try JSONDecoder().decode(ConnectionNode.self, from: legacy)
+        XCTAssertFalse(loaded.usesSudo)
+        XCTAssertEqual(loaded.id, node.id)
+        XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("usesSudo\":false"))
+
+        // The draft carries it through the editor.
+        let draft = ConnectionDraft(from: node)
+        XCTAssertTrue(draft.usesSudo)
+        XCTAssertEqual(ConnectionDraft(id: node.id, name: "web", usesSudo: true).usesSudo, true)
+    }
+
     // MARK: Refusals are typed and classified
 
     func testWrongPasswordSurfacesSudosOwnWordsAsOneTypedError() async throws {
