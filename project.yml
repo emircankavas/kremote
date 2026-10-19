@@ -17,10 +17,14 @@ packages:
   swift-crypto:
     url: https://forgejo.kavas.dev/emircan/swift-crypto
     exactVersion: 3.15.1
+  # SwiftTerm, from a writable Forgejo fork rather than the read-only mirror:
+  # the upstream manifest declares dependencies on github.com (swift-argument-
+  # parser, swift-docc-plugin) and Xcode's package resolver ignores a package's
+  # .swiftpm/mirrors.json, so the URLs inside the manifest have to change. The
+  # fork's `v1.20.0-forgejo` tag is upstream v1.20.0 with only those URLs edited.
   SwiftTerm:
-    url: https://forgejo.kavas.dev/emircan/SwiftTerm
-    # 1.20.0 (tools 6.0); newer tags declare tools 6.2, unsupported by the CI Xcode.
-    exactVersion: 1.20.0
+    url: https://forgejo.kavas.dev/emircan/SwiftTerm-forgejo
+    exactVersion: v1.20.0-forgejo
 
 settings:
   base:
