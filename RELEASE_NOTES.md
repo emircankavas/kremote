@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 6
+## KRemote 1.8.0 beta 7
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -17,6 +17,18 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### Fixed: folders would not open
+
+A row had two separate click handlers — one for selecting, one for opening on a
+double click — and on macOS the first one consumed the click before the second
+could see it. So a folder could be highlighted but never entered. Both the list
+and the icon view now use a single gesture that tells a single click from a
+double click.
+
+Also: **Return / Enter** open the highlighted folder (as in Finder), and a folder
+the server refuses to read now returns you to the folder you came from with the
+server's message, instead of showing an empty window that looks broken.
 
 ### Fixed: KRemote quitting on open (beta 5 crash)
 
@@ -94,7 +106,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.6 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.7 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not
