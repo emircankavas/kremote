@@ -19,6 +19,13 @@ xcuserdata/
 .swiftpm/
 Package.resolved
 
+# But keep the dependency mirrors that point third-party packages at the Forgejo
+# copies: without this file swift-crypto's transitive swift-asn1 dependency is
+# still fetched from github.com.
+!Packages/KRemoteCore/.swiftpm/
+!Packages/KRemoteCore/.swiftpm/configuration/
+!Packages/KRemoteCore/.swiftpm/configuration/mirrors.json
+
 # macOS
 .DS_Store
 

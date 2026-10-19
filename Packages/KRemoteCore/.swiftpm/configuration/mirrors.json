@@ -1,0 +1,9 @@
+{
+  "object": [
+    {
+      "original": "https://github.com/apple/swift-asn1.git",
+      "mirror": "https://forgejo.kavas.dev/emircan/swift-asn1.git"
+    }
+  ],
+  "version": 1
+}
