@@ -543,12 +543,18 @@ extension SFTPClient {
 
     struct LocalFile {
         let url: URL
-        /// The path below the walked root, starting with `/`.
+        /// The path below the walked root, always starting with `/`.
         let relativePath: String
         let size: Int64
     }
 
     /// Every regular file under `root`, depth first, symlinks skipped.
+    ///
+    /// The relative path is taken from the enumerator's own URLs, not by trimming a
+    /// fixed prefix off `url.path`: on macOS the returned URLs may be resolved
+    /// through a symlink (`/tmp` → `/private/tmp`), and a length-based trim then
+    /// produces a mangled name — a real bug the live round trip caught, where the
+    /// tree landed in `/tmp/kremote-t6ff-live/ff-tree` instead of `tree-upload`.
     static func walkLocal(_ root: URL) throws -> [LocalFile] {
         let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .isSymbolicLinkKey]
         guard let enumerator = FileManager.default.enumerator(
@@ -559,11 +565,22 @@ extension SFTPClient {
         ) else {
             throw SFTPError.invalidArgument("could not read \(root.path)")
         }
+        let rootComponents = root.standardizedFileURL.resolvingSymlinksInPath()
+            .pathComponents
+            .filter { $0 != "/" }
         var files: [LocalFile] = []
         for case let url as URL in enumerator {
             let values = try url.resourceValues(forKeys: Set(keys))
             if values.isDirectory == true || values.isSymbolicLink == true { continue }
-            let suffix = String(url.path.dropFirst(root.path.count))
+            let components = url.standardizedFileURL.pathComponents.filter { $0 != "/" }
+            // Walk the file's components past the root's, so a resolved symlink
+            // prefix simply matches what the enumerator reported.
+            var start = 0
+            while start < rootComponents.count, start < components.count,
+                  components[start] == rootComponents[start] {
+                start += 1
+            }
+            let suffix = "/" + components.dropFirst(start).joined(separator: "/")
             files.append(LocalFile(url: url, relativePath: suffix, size: Int64(values.fileSize ?? 0)))
         }
         return files
