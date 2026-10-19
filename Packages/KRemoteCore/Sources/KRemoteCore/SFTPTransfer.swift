@@ -49,10 +49,12 @@ extension TransferCancelled: LocalizedError {
 /// once over the elevated channel exactly like every other operation.
 extension SFTPClient {
 
-    /// Downloads one file into `localURL`, replacing whatever is there.
+    /// Downloads one file into `localURL`, which only appears once the transfer
+    /// has finished.
     ///
-    /// The caller passes the final *or* temporary (`.part`) URL — this method
-    /// does not rename anything; naming is the window's business.
+    /// The bytes go to `localURL.part` and are renamed into place on the last
+    /// chunk, so a cancelled or failed download never leaves a half file that
+    /// looks complete — and the `.part` file is deleted on every exit path.
     @discardableResult
     public func downloadFile(
         _ remotePath: String,
@@ -61,6 +63,31 @@ extension SFTPClient {
         isCancelled: (@Sendable () -> Bool)? = nil
     ) async throws -> Int64 {
         let target = Self.normalise(remotePath)
+        let partURL = Self.partURL(for: localURL)
+        do {
+            let written = try await downloadChunks(
+                target, to: partURL, progress: progress, isCancelled: isCancelled
+            )
+            // Replace, don't merge: the window asked the user about a conflict
+            // already, and a stale file left behind would be worse than none.
+            if FileManager.default.fileExists(atPath: localURL.path) {
+                try FileManager.default.removeItem(at: localURL)
+            }
+            try FileManager.default.moveItem(at: partURL, to: localURL)
+            return written
+        } catch {
+            Self.removeQuietly(partURL)
+            throw error
+        }
+    }
+
+    /// The streaming half of a download. Writes `partURL` verbatim.
+    private func downloadChunks(
+        _ target: String,
+        to partURL: URL,
+        progress: (@Sendable (TransferProgress) -> Void)?,
+        isCancelled: (@Sendable () -> Bool)?
+    ) async throws -> Int64 {
         return try await perform(path: target) { client in
             let size = (try? await client.stat(target))?.size
             let openReply = try await client.request(
@@ -78,13 +105,13 @@ extension SFTPClient {
             // a dead transport: a server holds an open file until CLOSE arrives.
             var closed = false
             do {
-                if FileManager.default.fileExists(atPath: localURL.path) {
-                    try FileManager.default.removeItem(at: localURL)
+                if FileManager.default.fileExists(atPath: partURL.path) {
+                    try FileManager.default.removeItem(at: partURL)
                 }
-                guard FileManager.default.createFile(atPath: localURL.path, contents: nil) else {
-                    throw SFTPError.transport("could not create \(localURL.path)")
+                guard FileManager.default.createFile(atPath: partURL.path, contents: nil) else {
+                    throw SFTPError.transport("could not create \(partURL.path)")
                 }
-                let file = try FileHandle(forWritingTo: localURL)
+                let file = try FileHandle(forWritingTo: partURL)
                 defer { try? file.close() }
 
                 var offset: UInt64 = 0
@@ -130,7 +157,11 @@ extension SFTPClient {
         }
     }
 
-    /// Uploads one local file to `remotePath`, creating or truncating it.
+    /// Uploads one local file to `remotePath`, which only appears complete.
+    ///
+    /// The bytes go to a `.part` name beside the target and are RENAMEd over it
+    /// when the last chunk is acknowledged, so a cancelled upload leaves nothing
+    /// under the real name and the `.part` is removed on every exit path.
     @discardableResult
     public func uploadFile(
         _ localURL: URL,
@@ -139,6 +170,26 @@ extension SFTPClient {
         isCancelled: (@Sendable () -> Bool)? = nil
     ) async throws -> Int64 {
         let target = Self.normalise(remotePath)
+        let partPath = Self.remotePartPath(target)
+        do {
+            let written = try await uploadChunks(
+                localURL, to: partPath, progress: progress, isCancelled: isCancelled
+            )
+            try await rename(partPath, to: target)
+            return written
+        } catch {
+            try? await remove(partPath)
+            throw error
+        }
+    }
+
+    /// The streaming half of an upload. Writes `target` verbatim.
+    private func uploadChunks(
+        _ localURL: URL,
+        to target: String,
+        progress: (@Sendable (TransferProgress) -> Void)?,
+        isCancelled: (@Sendable () -> Bool)?
+    ) async throws -> Int64 {
         let attributes = try FileManager.default.attributesOfItem(atPath: localURL.path)
         let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
         let reader = try FileHandle(forReadingFrom: localURL)
@@ -427,6 +478,27 @@ extension SFTPClient {
     }
 
     // MARK: - Local helpers
+
+    /// The `.part` sibling of a local target. Kept next to the target, not in
+    /// /tmp, so the final rename is a same-volume move and cannot half-copy.
+    static func partURL(for url: URL) -> URL {
+        url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).part")
+    }
+
+    /// The `.part` sibling of a remote target, hidden so a listing does not show
+    /// a transfer in progress next to a file of the same name.
+    static func remotePartPath(_ path: String) -> String {
+        let directory = parent(of: path)
+        let name = (normalise(path) as NSString).lastPathComponent
+        return join(directory, ".\(name).part")
+    }
+
+    /// Removes a local file if it is there, never throwing: this runs on cleanup
+    /// paths where the original error is the one worth reporting.
+    static func removeQuietly(_ url: URL) {
+        try? FileManager.default.removeItem(at: url)
+    }
 
     struct LocalFile {
         let url: URL

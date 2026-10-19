@@ -145,35 +145,36 @@ public final class SFTPClient: @unchecked Sendable {
     }
 
     /// One bounded read. `nil` means the peer closed the pipe.
+    ///
+    /// The blocking read and the timeout race, and **exactly one** of them may
+    /// resume the continuation — a second resume traps in
+    /// `CheckedContinuation.resume`. The guard therefore returns a Bool out of
+    /// `withLock`; a `return` inside that closure would only leave the closure and
+    /// let the caller resume a second time.
     private func readChunk() async throws -> Data? {
         let transport = self.transport
         let timeout = self.replyTimeout
 
         return try await withCheckedThrowingContinuation { continuation in
-            // A dedicated queue per read: the call blocks, and the continuation is
-            // resumed exactly once — either with the bytes or by the timeout.
-            let resumed = NSLock()
-            var hasResumed = false
-            func finish(_ result: Result<Data?, Error>) {
-                resumed.withLock {
-                    guard !hasResumed else { return }
-                    hasResumed = true
-                }
-                continuation.resume(with: result)
-            }
+            let state = ResumeOnce(continuation)
 
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
-                    finish(.success(try transport.read(maxLength: 64 * 1024)))
+                    state.finish(.success(try transport.read(maxLength: 64 * 1024)))
                 } catch {
-                    finish(.failure(error))
+                    state.finish(.failure(error))
                 }
             }
 
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                finish(.failure(SFTPError.connectionClosed(
+                // Cancelling the child releases the read that is still blocked in
+                // `availableData`; without this the abandoned thread would sit on
+                // the pipe for the life of the process.
+                if state.finish(.failure(SFTPError.connectionClosed(
                     "the server did not answer within \(Int(timeout))s"
-                )))
+                ))) {
+                    transport.close()
+                }
             }
         }
     }
