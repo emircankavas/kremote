@@ -557,17 +557,20 @@ extension SFTPClient {
     /// tree landed in `/tmp/kremote-t6ff-live/ff-tree` instead of `tree-upload`.
     static func walkLocal(_ root: URL) throws -> [LocalFile] {
         let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .isSymbolicLinkKey]
+        // Enumerate the *resolved* root: `FileManager.enumerator` does not descend
+        // through a symlinked directory on macOS (it yields nothing), while the
+        // paths it does return are resolved. Using the resolved root for both sides
+        // keeps enumeration working and the prefix matching honest.
+        let resolved = root.standardizedFileURL.resolvingSymlinksInPath()
         guard let enumerator = FileManager.default.enumerator(
-            at: root,
+            at: resolved,
             includingPropertiesForKeys: keys,
             options: [.skipsHiddenFiles],
             errorHandler: nil
         ) else {
             throw SFTPError.invalidArgument("could not read \(root.path)")
         }
-        let rootComponents = root.standardizedFileURL.resolvingSymlinksInPath()
-            .pathComponents
-            .filter { $0 != "/" }
+        let rootComponents = resolved.pathComponents.filter { $0 != "/" }
         var files: [LocalFile] = []
         for case let url as URL in enumerator {
             let values = try url.resourceValues(forKeys: Set(keys))
