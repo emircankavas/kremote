@@ -55,7 +55,9 @@ struct SFTPWindowView: View {
     /// Hidden files stay per user as well, the way Finder remembers ⇧⌘..
     @AppStorage("sftpShowHidden") private var showHidden = false
 
-    @State private var selection: String?
+    @State private var selection: Set<String> = []
+    /// Where a ⇧-click range is measured from.
+    @State private var selectionAnchor: String?
     @State private var sortColumn: SFTPSortColumn = .name
     @State private var sortAscending = true
     @State private var goToPath = ""
@@ -65,8 +67,21 @@ struct SFTPWindowView: View {
     @State private var renameTarget: RemoteEntry?
     @State private var renameDraft = ""
     @State private var deleteTarget: [RemoteEntry] = []
+    /// How many entries a folder delete would remove, from the server, so the
+    /// confirmation names a real number.
+    @State private var deleteItemCount: Int?
     @State private var isDeletePresented = false
     @State private var permissionsTarget: RemoteEntry?
+    /// The permissions sheet for a whole selection (nil when it is one row).
+    @State private var permissionsRequest: PermissionsRequest?
+    /// A download batch waiting on the conflict answer, plus its conflict-free part.
+    @State private var pendingConflicts: [(entry: RemoteEntry, destination: URL)] = []
+    @State private var pendingFreeDownloads: [(entry: RemoteEntry, destination: URL)] = []
+    @State private var conflictName = ""
+    @State private var conflictDirectory: URL?
+    @State private var isConflictPresented = false
+    /// One modal that needs the user's answer: a batch summary or a single failure.
+    @State private var batchSheet: BatchPrompt?
 
     private var viewMode: SFTPViewMode {
         get { SFTPViewMode(rawValue: viewModeRaw) ?? .list }
@@ -74,6 +89,12 @@ struct SFTPWindowView: View {
     }
 
     var body: some View {
+        sheets(alerts(layout))
+    }
+
+    /// The window's frame. Kept separate from the sheet/alert chain: one `body`
+    /// holding all of it pushes the SwiftUI type checker past its limit.
+    private var layout: some View {
         VStack(spacing: 0) {
             toolbar
             Divider()
@@ -82,6 +103,8 @@ struct SFTPWindowView: View {
                 Divider()
                 content
             }
+            Divider()
+            SFTPTransferPanel(session: session)
             Divider()
             statusBar
         }
@@ -100,42 +123,95 @@ struct SFTPWindowView: View {
             .opacity(0)
             .frame(width: 0, height: 0)
         )
-        .onChange(of: session.path) { _, _ in selection = nil }
-        .sheet(isPresented: $isGoToPresented) { goToSheet }
-        .sheet(item: $permissionsTarget) { entry in
-            SFTPPermissionsSheet(entries: [entry], session: session) { _ in
-                permissionsTarget = nil
-            }
+        .onChange(of: session.path) { _, _ in
+            selection = []
+            selectionAnchor = nil
+            session.selectedPath = nil
         }
-        .alert("New Folder", isPresented: $isNewFolderPresented) {
-            TextField("Name", text: $newFolderName)
-            Button("Cancel", role: .cancel) {}
-            Button("Create") {
-                let name = newFolderName
-                Task { await session.createFolder(named: name) }
-            }
-        } message: {
-            Text("Create a folder in \(session.path).")
+        .onChange(of: session.entries) { _, _ in
+            // A selection must not outlive its rows: "Get Info" after a delete
+            // would otherwise act on something no longer listed.
+            let paths = Set(session.entries.map(\.path))
+            selection = selection.intersection(paths)
         }
-        .alert("Rename", isPresented: renamePresented, presenting: renameTarget) { entry in
-            TextField("Name", text: $renameDraft)
-            Button("Cancel", role: .cancel) {}
-            Button("Rename") {
-                let name = renameDraft
-                Task { await session.rename(entry, to: name) }
+    }
+
+    /// The prompts that take a text answer or a yes/no.
+    private func alerts<V: View>(_ view: V) -> some View {
+        view
+            .confirmationDialog(deleteTitle, isPresented: $isDeletePresented, titleVisibility: .visible) {
+                Button("Delete", role: .destructive) {
+                    let entries = deleteTarget
+                    Task { report(await session.delete(entries)) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(deleteMessage)
             }
-        } message: { entry in
-            Text("Rename \(entry.name).")
-        }
-        .confirmationDialog(deleteTitle, isPresented: $isDeletePresented, titleVisibility: .visible) {
-            Button("Delete", role: .destructive) {
-                let entries = deleteTarget
-                Task { await session.delete(entries) }
+            .alert("New Folder", isPresented: $isNewFolderPresented) {
+                TextField("Name", text: $newFolderName)
+                Button("Cancel", role: .cancel) {}
+                Button("Create") {
+                    let name = newFolderName
+                    Task {
+                        if case .failure(let error) = await session.createFolder(named: name) {
+                            batchSheet = .failure(error)
+                        }
+                    }
+                }
+            } message: {
+                Text("Create a folder in \(session.path).")
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This cannot be undone.")
-        }
+            .alert("Rename", isPresented: renamePresented, presenting: renameTarget) { entry in
+                TextField("Name", text: $renameDraft)
+                Button("Cancel", role: .cancel) {}
+                Button("Rename") {
+                    let name = renameDraft
+                    Task {
+                        if case .failure(let error) = await session.rename(entry, to: name) {
+                            batchSheet = .failure(error)
+                        }
+                    }
+                }
+            } message: { entry in
+                Text("Rename \(entry.name).")
+            }
+    }
+
+    /// The sheets and the overwrite question.
+    private func sheets<V: View>(_ view: V) -> some View {
+        view
+            .sheet(isPresented: $isGoToPresented) { goToSheet }
+            .sheet(item: $permissionsTarget) { entry in
+                SFTPPermissionsSheet(entries: [entry], session: session) { outcome in
+                    permissionsTarget = nil
+                    report(outcome)
+                }
+            }
+            .sheet(item: $permissionsRequest) { request in
+                SFTPPermissionsSheet(entries: request.entries, session: session) { outcome in
+                    permissionsRequest = nil
+                    report(outcome)
+                }
+            }
+            .sheet(item: $batchSheet) { prompt in
+                promptView(prompt)
+            }
+            .confirmationDialog(
+                "“\(conflictName)” already exists",
+                isPresented: $isConflictPresented,
+                titleVisibility: .visible
+            ) {
+                Button("Replace") { resolveConflicts(.replace) }
+                Button("Keep Both") { resolveConflicts(.keepBoth) }
+                Button("Skip") { resolveConflicts(.skip) }
+                Button("Cancel", role: .cancel) {
+                    pendingConflicts = []
+                    pendingFreeDownloads = []
+                }
+            } message: {
+                Text(conflictMessage)
+            }
     }
 
     // MARK: - Toolbar
@@ -199,7 +275,7 @@ struct SFTPWindowView: View {
             .help("Download the selected item (⌘D)")
             .accessibilityLabel("Download")
             .keyboardShortcut("d", modifiers: .command)
-            .disabled(selection == nil)
+            .disabled(selection.isEmpty)
 
             Button { upload() } label: {
                 Image(systemName: "arrow.up.circle")
@@ -467,7 +543,7 @@ struct SFTPWindowView: View {
         .padding(.horizontal, 12)
         .frame(height: 24)
         .background(
-            selection == entry.path ? Color.accentColor.opacity(0.20) : Color.clear
+            selection.contains(entry.path) ? Color.accentColor.opacity(0.20) : Color.clear
         )
         .contentShape(Rectangle())
         // One gesture recogniser, not two. A separate `onTapGesture` for the
@@ -478,8 +554,19 @@ struct SFTPWindowView: View {
                 .exclusively(before: TapGesture().onEnded { select(entry) })
         )
         .contextMenu { rowMenu(entry) }
+        .draggable(entry.path) {
+            // The drag image is the real icon and name, so a drop target shows what
+            // is being dragged rather than a bare path string.
+            HStack(spacing: 6) {
+                Image(nsImage: FileIcon.image(for: entry))
+                Text(entry.name)
+            }
+            .padding(6)
+        }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityText(entry))
+        .accessibilityValue(selection.contains(entry.path) ? "selected" : "")
+        .accessibilityAddTraits(selection.contains(entry.path) ? [.isSelected] : [])
         .accessibilityHint(entry.isDirectory ? "Double-click to open this folder" : "")
     }
 
@@ -505,7 +592,7 @@ struct SFTPWindowView: View {
                     .padding(6)
                     .background(
                         RoundedRectangle(cornerRadius: 8)
-                            .fill(selection == entry.path
+                            .fill(selection.contains(entry.path)
                                   ? Color.accentColor.opacity(0.22)
                                   : Color.clear)
                     )
@@ -515,8 +602,11 @@ struct SFTPWindowView: View {
                             .exclusively(before: TapGesture().onEnded { select(entry) })
                     )
                     .contextMenu { rowMenu(entry) }
+                    .draggable(entry.path)
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel(accessibilityText(entry))
+                    .accessibilityValue(selection.contains(entry.path) ? "selected" : "")
+                    .accessibilityAddTraits(selection.contains(entry.path) ? [.isSelected] : [])
                     .accessibilityHint(entry.isDirectory ? "Double-click to open this folder" : "")
                 }
             }
@@ -589,6 +679,7 @@ struct SFTPWindowView: View {
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
             Spacer()
+            selectionStatus
             Text("\(rows.count) of \(session.entries.count) items")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -597,6 +688,31 @@ struct SFTPWindowView: View {
         .padding(.horizontal, 10)
         .frame(height: 24)
         .background(.bar)
+    }
+
+    /// "3 of 12 selected · 4.2 MB · 1 folder" — the item count and total selected
+    /// size the card asks the status bar to show. Folder sizes are not summed: that
+    /// would be a tree walk on every click.
+    @ViewBuilder
+    private var selectionStatus: some View {
+        let summary = session.selectionSummary(selection, rows: rows)
+        if summary.count > 0 {
+            Text(selectionText(summary))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel(selectionText(summary))
+        }
+    }
+
+    /// Split out of the view builder: a `var` with appends inside an `@ViewBuilder`
+    /// if-block pushes the type checker over its limit.
+    private func selectionText(_ summary: (count: Int, bytes: UInt64, folders: Int)) -> String {
+        var parts = ["\(summary.count) of \(rows.count) selected"]
+        if summary.bytes > 0 { parts.append(ByteFormatter.string(summary.bytes)) }
+        if summary.folders > 0 {
+            parts.append(summary.folders == 1 ? "1 folder" : "\(summary.folders) folders")
+        }
+        return parts.joined(separator: " · ")
     }
 
     // MARK: - Prompts
@@ -612,6 +728,35 @@ struct SFTPWindowView: View {
         return "Delete \(deleteTarget.count) items?"
     }
 
+    /// Names what the delete takes with it. For a folder the count is the server's,
+    /// so the sentence states a real number rather than "all contents" — the card
+    /// requires the recursive item count.
+    private var deleteMessage: String {
+        guard deleteTarget.count == 1, let only = deleteTarget.first, only.isDirectory,
+              let total = deleteItemCount else {
+            return "This is permanent: SFTP has no Trash."
+        }
+        // `total` counts the folder itself, so the contents are total - 1.
+        let contents = max(0, total - 1)
+        let listing = contents == 0
+            ? "It is empty."
+            : "It contains \(contents) item\(contents == 1 ? "" : "s"), which are deleted too."
+        return "\(listing) This is permanent: SFTP has no Trash."
+    }
+
+    /// The conflict dialog's second line: what each answer does, and how many other
+    /// items the answer covers.
+    private var conflictMessage: String {
+        let directory = conflictDirectory?.path ?? "that folder"
+        let others = pendingConflicts.count - 1
+        var lines = ["There is already an item named “\(conflictName)” in \(directory)."]
+        if others > 0 {
+            lines.append("This answer applies to the other \(others) conflicting item\(others == 1 ? "" : "s") too.")
+        }
+        lines.append("Replace overwrites it, Keep Both saves this copy under a new name, Skip leaves it alone.")
+        return lines.joined(separator: "\n")
+    }
+
     private func beginNewFolder() {
         newFolderName = "untitled folder"
         isNewFolderPresented = true
@@ -624,16 +769,48 @@ struct SFTPWindowView: View {
 
     private func confirmDelete(_ entries: [RemoteEntry]) {
         deleteTarget = entries
+        deleteItemCount = nil
         isDeletePresented = true
+        // Count before the dialog is read, so a folder's sentence names the real
+        // number of entries the server would remove.
+        guard entries.count == 1, let only = entries.first, only.isDirectory, !only.isSymlink else {
+            return
+        }
+        Task { deleteItemCount = await session.deleteCount(for: only) }
     }
 
     // MARK: - Actions
 
-    /// Picking a row: selection is shared with the session so Return knows what
-    /// is highlighted.
+    /// Picking a row, with Finder's modifiers: ⌘ toggles, ⇧ extends the range from
+    /// the anchor, a plain click replaces. Shared with the session so Return knows
+    /// what is highlighted.
     private func select(_ entry: RemoteEntry) {
-        selection = entry.path
-        session.selectedPath = entry.path
+        let modifiers = NSEvent.modifierFlags
+        if modifiers.contains(.command) {
+            if selection.contains(entry.path) {
+                selection.remove(entry.path)
+            } else {
+                selection.insert(entry.path)
+            }
+            selectionAnchor = entry.path
+        } else if modifiers.contains(.shift),
+                  let selectionAnchor,
+                  let start = rows.firstIndex(where: { $0.path == selectionAnchor }),
+                  let end = rows.firstIndex(where: { $0.path == entry.path }) {
+            let range = start <= end ? start...end : end...start
+            selection = Set(rows[range].map(\.path))
+        } else {
+            selection = [entry.path]
+            selectionAnchor = entry.path
+        }
+        session.selectedPath = selection.count == 1 ? selection.first : nil
+    }
+
+    private func clearSelection() {
+        guard !selection.isEmpty else { return }
+        selection = []
+        selectionAnchor = nil
+        session.selectedPath = nil
     }
 
     private func openSelection() {
@@ -656,16 +833,28 @@ struct SFTPWindowView: View {
 
     @ViewBuilder
     private func rowMenu(_ entry: RemoteEntry) -> some View {
+        // Right-clicking a row outside the selection acts on that row alone, as
+        // Finder does — otherwise "Delete" would act on something invisible.
+        let targets = selection.contains(entry.path) ? selectedEntries : [entry]
+        let many = targets.count > 1
+
         if entry.isDirectory {
             Button("Open") { open(entry) }
-            Button("Download Folder…") { download([entry]) }
-        } else {
-            Button("Download…") { download([entry]) }
         }
+        Button(many ? "Download \(targets.count) Items…" : "Download…") { download(targets) }
         Divider()
         Button("Rename…") { beginRename(entry) }
-        Button("Delete", role: .destructive) { confirmDelete([entry]) }
-        Button("Permissions…") { permissionsTarget = entry }
+            .disabled(many)
+        Button(many ? "Delete \(targets.count) Items…" : "Delete…", role: .destructive) {
+            confirmDelete(targets)
+        }
+        Button(many ? "Permissions for \(targets.count) Items…" : "Permissions…") {
+            if many {
+                permissionsRequest = PermissionsRequest(entries: targets)
+            } else {
+                permissionsTarget = entry
+            }
+        }
         Divider()
         Button("Copy Path") {
             NSPasteboard.general.clearContents()
@@ -675,8 +864,7 @@ struct SFTPWindowView: View {
 
     /// The rows the current selection names.
     private var selectedEntries: [RemoteEntry] {
-        guard let selection else { return [] }
-        return rows.filter { $0.path == selection }
+        rows.filter { selection.contains($0.path) }
     }
 
     /// Downloads the selection, or an explicit set supplied by a row menu.
@@ -708,20 +896,62 @@ struct SFTPWindowView: View {
             : "Choose where to save \(entries.count) items"
         guard panel.runModal() == .OK, let directory = panel.url else { return }
 
-        let resolved = entries.map { entry -> (entry: RemoteEntry, destination: URL) in
-            var destination = directory.appendingPathComponent(entry.name)
-            var copy = 2
-            while FileManager.default.fileExists(atPath: destination.path) {
-                let base = (entry.name as NSString).deletingPathExtension
-                let ext = (entry.name as NSString).pathExtension
-                destination = directory.appendingPathComponent(
-                    base + " \(copy)" + (ext.isEmpty ? "" : ".\(ext)")
-                )
-                copy += 1
+        // Never overwrite silently: names that already exist are held back and the
+        // user answers once — Replace, Keep Both (Finder numbering) or Skip — and
+        // the answer covers every conflicting item in this batch.
+        var free: [(entry: RemoteEntry, destination: URL)] = []
+        var conflicts: [(entry: RemoteEntry, destination: URL)] = []
+        for entry in entries {
+            let target = directory.appendingPathComponent(entry.name)
+            if FileManager.default.fileExists(atPath: target.path) {
+                conflicts.append((entry, target))
+            } else {
+                free.append((entry, target))
             }
-            return (entry, destination)
         }
-        session.enqueueDownload(resolved)
+        pendingFreeDownloads = free
+        guard let first = conflicts.first else {
+            pendingFreeDownloads = []
+            session.enqueueDownload(free)
+            return
+        }
+        pendingConflicts = conflicts
+        conflictName = first.entry.name
+        conflictDirectory = directory
+        isConflictPresented = true
+    }
+
+    /// Applies the conflict answer to the whole batch, then enqueues it.
+    private func resolveConflicts(_ resolution: ConflictResolution) {
+        let conflicts = pendingConflicts
+        let free = pendingFreeDownloads
+        pendingConflicts = []
+        pendingFreeDownloads = []
+        guard !conflicts.isEmpty else { return }
+
+        switch resolution {
+        case .skip:
+            // Reported, not silently dropped: a file the user asked for and did
+            // not get must be visible in one summary.
+            var outcome = BatchOutcome()
+            outcome.skipped = conflicts.map(\.entry.name) + free.map(\.entry.name)
+            if !free.isEmpty { session.enqueueDownload(free) }
+            report(outcome)
+        case .replace:
+            session.enqueueDownload(free + conflicts)
+        case .keepBoth:
+            var resolved = free
+            var taken = Set(free.map { $0.destination.lastPathComponent })
+            for conflict in conflicts {
+                let folder = conflict.destination.deletingLastPathComponent()
+                let onDisk = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+                taken.formUnion(onDisk)
+                let name = ConflictResolver.keepBothName(for: conflict.entry.name, existing: taken)
+                taken.insert(name)
+                resolved.append((conflict.entry, folder.appendingPathComponent(name)))
+            }
+            session.enqueueDownload(resolved)
+        }
     }
 
     private func upload() {
@@ -761,6 +991,119 @@ struct SFTPWindowView: View {
         isGoToPresented = false
         Task { await session.go(to: destination) }
     }
+
+    // MARK: - Reporting
+
+    /// One place that decides how a batch is reported: silence when everything
+    /// worked, one summary when part of it did not, one failure sheet for a single
+    /// item. Never one modal per item.
+    private func report(_ outcome: BatchOutcome) {
+        guard !outcome.isEmpty else { return }
+        if outcome.isCompleteSuccess { return }
+        if outcome.failedNames.count == 1, outcome.succeeded.isEmpty, outcome.skipped.isEmpty,
+           let failure = outcome.failures.first {
+            batchSheet = .failure(OperationError(name: failure.name, error: ServerMessage(failure.reason)))
+            return
+        }
+        batchSheet = .summary(outcome)
+    }
+
+    @ViewBuilder
+    private func promptView(_ prompt: BatchPrompt) -> some View {
+        switch prompt {
+        case .summary(let outcome):
+            batchSummarySheet(outcome)
+        case .failure(let error):
+            failureSheet(error)
+        }
+    }
+
+    /// The one summary a partially completed batch shows, with the exact list of
+    /// what worked and what did not.
+    private func batchSummarySheet(_ outcome: BatchOutcome) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: outcome.failures.isEmpty
+                      ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(outcome.failures.isEmpty ? .green : .orange)
+                    .font(.title2)
+                    .accessibilityHidden(true)
+                Text(outcome.headline).font(.headline)
+            }
+            ScrollView {
+                Text(outcome.detail)
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 260)
+            HStack {
+                Spacer()
+                Button("OK") { batchSheet = nil }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(width: 500)
+    }
+
+    /// One failure, worded with whether elevation was tried — never a dead end.
+    private func failureSheet(_ failure: OperationError) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: OperationFailureText.isPermissionDenied(failure.error)
+                      ? "lock.trianglebadge.exclamationmark" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.title2)
+                    .accessibilityHidden(true)
+                Text(OperationFailureText.title(for: failure.error, subject: failure.name))
+                    .font(.headline)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(OperationFailureText.message(for: failure.error, context: session.elevationContext))
+                .font(.callout)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("OK") { batchSheet = nil }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(width: 480)
+    }
+}
+
+/// One modal that needs the user's answer. `Identifiable` so it can drive a single
+/// `sheet(item:)`: two summaries can never race for one presentation slot.
+enum BatchPrompt: Identifiable {
+    case summary(BatchOutcome)
+    case failure(OperationError)
+
+    var id: String {
+        switch self {
+        case .summary(let outcome):
+            return "summary-\(outcome.headline)-\(outcome.succeeded.count)-\(outcome.failures.count)"
+        case .failure(let error):
+            return "failure-\(error.id)"
+        }
+    }
+}
+
+/// One or many entries whose permissions the sheet edits. `Identifiable` so it can
+/// drive `sheet(item:)`.
+struct PermissionsRequest: Identifiable {
+    let entries: [RemoteEntry]
+    var id: String { entries.map(\.id).joined(separator: "|") }
+}
+
+/// Carries a batch failure's already-formatted reason into the single-failure
+/// sheet, so the server's words are shown without re-deriving a typed error.
+struct ServerMessage: LocalizedError {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var errorDescription: String? { text }
 }
 
 // MARK: - Formatting helpers
