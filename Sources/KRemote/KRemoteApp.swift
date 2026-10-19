@@ -7,6 +7,15 @@ struct KRemoteApp: App {
     @State private var showUpdate = false
     /// Silently checked once at launch; drives the "update available" hint.
     @State private var updateAvailable: UpdateInfo?
+    /// Persisted channel selection. `@AppStorage` (rather than reading
+    /// `UpdateChecker.channel` once) is what makes the launch check follow a
+    /// channel switch made in Software Update: the value changes, and the
+    /// `onChange` below re-queries the appcast that channel points at.
+    @AppStorage("updateChannel") private var channelRaw = UpdateChannel.stable.rawValue
+
+    private var channel: UpdateChannel {
+        UpdateChannel(rawValue: channelRaw) ?? .stable
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -14,10 +23,9 @@ struct KRemoteApp: App {
                 .environment(model)
                 .frame(minWidth: 940, minHeight: 580)
                 .sheet(isPresented: $showUpdate) { UpdateView() }
-                .task {
-                    // Silent launch check; the result only surfaces as a menu item.
-                    guard let info = try? await UpdateChecker.check(), info.isNewer else { return }
-                    updateAvailable = info
+                .task { await silentCheck() }
+                .onChange(of: channelRaw) { _, _ in
+                    Task { await silentCheck() }
                 }
         }
         // System title bar back on (the app-drawn header did not work out), so
@@ -28,8 +36,8 @@ struct KRemoteApp: App {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { showUpdate = true }
-                if updateAvailable != nil {
-                    Button("Update Available (\(updateAvailable?.latestVersion ?? ""))…") { showUpdate = true }
+                if let updateAvailable {
+                    Button("Update Available (\(updateAvailable.latestVersion))…") { showUpdate = true }
                 }
             }
             CommandGroup(after: .newItem) {
@@ -65,5 +73,17 @@ struct KRemoteApp: App {
                 }
             }
         }
+    }
+
+    /// Silent check; the result only surfaces as a menu item. It asks for the
+    /// channel the user selected — a beta tester gets beta (plus the stable
+    /// fallback), a stable user only ever sees finished releases.
+    @MainActor
+    private func silentCheck() async {
+        guard let info = try? await UpdateChecker.check(channel: channel), info.isNewer else {
+            updateAvailable = nil
+            return
+        }
+        updateAvailable = info
     }
 }

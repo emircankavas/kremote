@@ -25,6 +25,12 @@ public struct UpdateInfo: Sendable, Equatable {
     public let assetName: String?
     public let assetURL: String?
     public let prerelease: Bool
+    /// `CFBundleVersion` of the running build and of the offered release. The
+    /// appcast only carries one when the release workflow stamped it; it is the
+    /// tiebreaker when the marketing versions are equal (rule 4 of the roadmap:
+    /// each beta iteration bumps the build number).
+    public let currentBuild: Int?
+    public let latestBuild: Int?
 
     public init(
         currentVersion: String,
@@ -35,7 +41,9 @@ public struct UpdateInfo: Sendable, Equatable {
         publishedAt: String,
         assetName: String?,
         assetURL: String?,
-        prerelease: Bool
+        prerelease: Bool,
+        currentBuild: Int? = nil,
+        latestBuild: Int? = nil
     ) {
         self.currentVersion = currentVersion
         self.latestVersion = latestVersion
@@ -46,10 +54,19 @@ public struct UpdateInfo: Sendable, Equatable {
         self.assetName = assetName
         self.assetURL = assetURL
         self.prerelease = prerelease
+        self.currentBuild = currentBuild
+        self.latestBuild = latestBuild
     }
 
-    /// True when the release is strictly newer than the running build.
-    public var isNewer: Bool { UpdateChecker.isVersion(latestVersion, newerThan: currentVersion) }
+    /// True when the release is strictly newer than the running build: the
+    /// marketing version decides (`1.8.0-beta.2 < 1.8.0-beta.10 < 1.8.0`), and
+    /// the build number only breaks a tie between equal versions.
+    public var isNewer: Bool {
+        let order = UpdateChecker.compare(latestVersion, currentVersion)
+        if order != 0 { return order > 0 }
+        guard let latestBuild, let currentBuild else { return false }
+        return latestBuild > currentBuild
+    }
 }
 
 /// Reads the update appcast published on Forgejo.
@@ -87,6 +104,14 @@ public enum UpdateChecker {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
     }
 
+    /// Build number of the running bundle (`CFBundleVersion`). Only used to break
+    /// a tie between two identical marketing versions.
+    public static var currentBuild: Int? {
+        if let n = Bundle.main.infoDictionary?["CFBundleVersion"] as? Int { return n }
+        if let s = Bundle.main.infoDictionary?["CFBundleVersion"] as? String { return Int(s) }
+        return nil
+    }
+
     public enum CheckError: LocalizedError {
         case badResponse(Int)
         case malformed
@@ -109,19 +134,95 @@ public enum UpdateChecker {
         "\(serverURL)/\(releasesOwner)/\(releasesRepo)/releases/tag/v\(version)"
     }
 
-    /// Fetches the appcast for `channel` and decides whether it is newer than the
-    /// running build. A missing appcast (HTTP 404) means "nothing published yet"
-    /// and is not an error.
+    /// Fetches the appcast for `channel` and decides which release to offer.
+    /// A missing appcast (HTTP 404) means "nothing published yet" and is not an
+    /// error.
+    ///
+    /// A **beta** user reads *both* appcasts: the beta one and the stable one,
+    /// and is offered the newer of the two. That is the stable-fallback rule —
+    /// a beta tester is moved onto the finished release once it ships. The
+    /// reverse never happens: a stable user only ever reads the stable appcast
+    /// and any `-beta` entry is discarded anyway.
     ///
     /// Every parameter defaults to production values; they exist so tests can
     /// drive the parser and the request without the network.
     public static func check(
         channel: UpdateChannel = UpdateChecker.channel,
         currentVersion: String = UpdateChecker.currentVersion,
+        currentBuild: Int? = UpdateChecker.currentBuild,
         appcastURL overrideURL: URL? = nil,
         session: URLSession = .shared
     ) async throws -> UpdateInfo? {
-        guard let base = overrideURL ?? appcastURL(channel: channel) else { return nil }
+        // `overrideURL` pins the request to a single document (tests, and any
+        // caller that already knows which appcast it wants).
+        let sources: [(channel: UpdateChannel, url: URL)]
+        if let overrideURL {
+            sources = [(channel, overrideURL)]
+        } else {
+            let channels: [UpdateChannel] = channel == .beta ? [.beta, .stable] : [.stable]
+            sources = channels.compactMap { ch in
+                appcastURL(channel: ch).map { (ch, $0) }
+            }
+        }
+        guard !sources.isEmpty else { return nil }
+
+        var candidates: [UpdateInfo] = []
+        var primaryError: Error?
+        for (index, source) in sources.enumerated() {
+            do {
+                if let info = try await fetch(
+                    source.url,
+                    currentVersion: currentVersion,
+                    currentBuild: currentBuild,
+                    session: session
+                ) {
+                    candidates.append(info)
+                }
+            } catch {
+                // The channel the user actually chose must fail loudly; the
+                // fallback appcast failing must not hide a good primary one.
+                if index == 0 { primaryError = error }
+            }
+        }
+        if let primaryError { throw primaryError }
+        return select(from: candidates, channel: channel)
+    }
+
+    /// Picks the release to offer out of the appcasts that were fetched.
+    ///
+    /// - Stable: pre-release entries are discarded outright, so a stable user is
+    ///   never offered a `-beta` build even if one is published on the beta
+    ///   appcast or hand-written into the stable one.
+    /// - Beta: everything is eligible, and the newest wins — `1.8.0` (the
+    ///   finished release) therefore beats `1.8.0-beta.3`, which is the
+    ///   stable-fallback rule from the roadmap.
+    public static func select(
+        from candidates: [UpdateInfo],
+        channel: UpdateChannel
+    ) -> UpdateInfo? {
+        let eligible = candidates.filter { candidate in
+            switch channel {
+            case .stable: return !candidate.prerelease && !isPrereleaseVersion(candidate.latestVersion)
+            case .beta: return true
+            }
+        }
+        return eligible.max { a, b in
+            let order = compare(a.latestVersion, b.latestVersion)
+            if order != 0 { return order < 0 }
+            // Same marketing version: the higher build number wins, and with no
+            // build numbers the two are interchangeable.
+            return (a.latestBuild ?? 0) < (b.latestBuild ?? 0)
+        }
+    }
+
+    /// Fetches and parses one appcast. Returns `nil` for a 404 — "nothing
+    /// published on this channel yet" is a normal state, not a failure.
+    private static func fetch(
+        _ base: URL,
+        currentVersion: String,
+        currentBuild: Int?,
+        session: URLSession
+    ) async throws -> UpdateInfo? {
         // Cache-buster: Forgejo's raw endpoint is fronted by a CDN, and a stale
         // appcast would hide a release the user was just told about.
         let stamp = Int(Date().timeIntervalSince1970)
@@ -140,12 +241,22 @@ public enum UpdateChecker {
         if http.statusCode == 404 { return nil }
         guard (200..<300).contains(http.statusCode) else { throw CheckError.badResponse(http.statusCode) }
 
-        return try parse(data, currentVersion: currentVersion)
+        return try parse(data, currentVersion: currentVersion, currentBuild: currentBuild)
+    }
+
+    /// True when the version string carries a pre-release suffix
+    /// (`1.8.0-beta.2`). Such a build is never offered on the stable channel.
+    public static func isPrereleaseVersion(_ version: String) -> Bool {
+        !split(version).1.isEmpty
     }
 
     /// Parses an appcast document. Separated from the request so it is testable
     /// without a network round-trip.
-    public static func parse(_ data: Data, currentVersion: String) throws -> UpdateInfo? {
+    public static func parse(
+        _ data: Data,
+        currentVersion: String,
+        currentBuild: Int? = nil
+    ) throws -> UpdateInfo? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw CheckError.malformed
         }
@@ -169,6 +280,16 @@ public enum UpdateChecker {
         // Whichever asset we hand back needs its filename too: the updater writes
         // the download to that name before expanding it.
         let chosen = zip ?? dmg
+        // Optional `CFBundleVersion` of the release. Additive: an appcast written
+        // before this field existed simply has no tiebreaker.
+        let build: Int?
+        if let n = obj["build"] as? Int {
+            build = n
+        } else if let s = obj["build"] as? String {
+            build = Int(s)
+        } else {
+            build = nil
+        }
 
         return UpdateInfo(
             currentVersion: currentVersion,
@@ -179,7 +300,9 @@ public enum UpdateChecker {
             publishedAt: (obj["publishedAt"] as? String) ?? "",
             assetName: chosen.map { ($0 as NSString).lastPathComponent },
             assetURL: chosen,
-            prerelease: (obj["prerelease"] as? Bool) ?? version.contains("-")
+            prerelease: (obj["prerelease"] as? Bool) ?? version.contains("-"),
+            currentBuild: currentBuild,
+            latestBuild: build
         )
     }
 

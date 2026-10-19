@@ -59,30 +59,61 @@ struct UpdateView: View {
                         .font(.system(size: 40))
                         .foregroundStyle(.green)
                     Text("You're up to date.")
-                    Text("Version \(UpdateChecker.currentVersion)").foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        // The running marketing version, verbatim: a beta build
+                        // reads "1.8.0-beta.2", not "1.8.0".
+                        Text("Version \(UpdateChecker.currentVersion)")
+                        if UpdateChecker.isPrereleaseVersion(UpdateChecker.currentVersion) {
+                            ChannelBadge(title: "BETA")
+                        }
+                    }
+                    .foregroundStyle(.secondary)
+                    if let message {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
         case .available, .installing, .failed:
             VStack(alignment: .leading, spacing: 12) {
                 if let info {
-                    HStack(alignment: .firstTextBaseline) {
+                    let isBeta = info.prerelease || UpdateChecker.isPrereleaseVersion(info.latestVersion)
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        // The marketing string exactly as released, so a beta
+                        // reads "KRemote 1.8.0-beta.2" and not "1.8.0".
                         Text(info.name).font(.title3.bold())
+                        if isBeta {
+                            ChannelBadge(title: "BETA")
+                        }
                         Text("(\(info.currentVersion) → \(info.latestVersion))")
                             .foregroundStyle(.secondary)
                     }
+
+                    if isBeta {
+                        Label(
+                            "Pre-release: this build may be unstable.",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                    }
+
                     ScrollView {
                         Text(info.notes.isEmpty ? "(No release notes.)" : info.notes)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxHeight: 240)
+                    .frame(maxHeight: 220)
                     .padding(10)
                     .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
                 }
 
                 if let message {
-                    Text(message).font(.caption).foregroundStyle(.red)
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(phase == .failed ? Color.red : Color.secondary)
                 }
 
                 if info == nil {
@@ -122,8 +153,10 @@ struct UpdateView: View {
                 info = result
                 phase = result.isNewer ? .available : .upToDate
             } else {
+                // No appcast (404) means nothing is published on this channel
+                // yet. That is a normal state, not a failed check.
                 info = nil
-                phase = .failed
+                phase = .upToDate
                 message = channel == .beta
                     ? "No beta build has been published yet."
                     : "No release has been published yet."
@@ -146,5 +179,20 @@ struct UpdateView: View {
                 message = error.localizedDescription
             }
         }
+    }
+}
+
+/// Small uppercase capsule marking a pre-release build.
+private struct ChannelBadge: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(.caption2.bold())
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(.orange.opacity(0.18), in: Capsule())
+            .foregroundStyle(.orange)
+            .accessibilityLabel("\(title) pre-release build")
     }
 }

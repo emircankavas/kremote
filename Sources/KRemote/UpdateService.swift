@@ -16,6 +16,7 @@ enum UpdateService {
         case extract
         case noAppInArchive
         case notWritable(String)
+        case versionMismatch(expected: String, found: String)
 
         var errorDescription: String? {
             switch self {
@@ -29,6 +30,8 @@ enum UpdateService {
                 return "The downloaded archive did not contain an application."
             case .notWritable(let path):
                 return "The application folder is not writable: \(path). Update it by hand."
+            case .versionMismatch(let expected, let found):
+                return "The downloaded build reports version \(found), but the release is \(expected)."
             }
         }
     }
@@ -61,6 +64,16 @@ enum UpdateService {
         let contents = try FileManager.default.contentsOfDirectory(at: extractDir, includingPropertiesForKeys: nil)
         guard let newApp = contents.first(where: { $0.pathExtension == "app" }) else {
             throw UpdateError.noAppInArchive
+        }
+
+        // 3b) The archive must actually be the release we asked for. The
+        //     marketing version is compared as text, so a pre-release tag
+        //     ("1.8.0-beta.2") round-trips verbatim through the filename, the
+        //     appcast and `CFBundleShortVersionString`.
+        let bundledVersion = NSDictionary(contentsOf: newApp.appendingPathComponent("Contents/Info.plist"))
+            .flatMap { $0["CFBundleShortVersionString"] as? String }
+        if let bundledVersion, bundledVersion != info.latestVersion {
+            throw UpdateError.versionMismatch(expected: info.latestVersion, found: bundledVersion)
         }
 
         // 4) The installed bundle must be replaceable.
