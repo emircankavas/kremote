@@ -66,12 +66,18 @@ public final class ProcessSFTPTransport: SFTPTransport, @unchecked Sendable {
         port: Int,
         username: String,
         identityFile: String,
-        remoteCommand: String = ""
+        remoteCommand: String = "",
+        extraOptions: [String] = []
     ) {
         var args = ["-T"]
         args += ["-o", "NumberOfPasswordPrompts=1"]
         args += ["-o", "PreferredAuthentications=publickey,password,keyboard-interactive,gssapi-with-mic"]
         args += ["-o", "StrictHostKeyChecking=accept-new"]
+        // Timeouts are ssh's job, not the caller's: a blocked pipe read cannot be
+        // interrupted from Swift, so a black-holed host would hang the caller
+        // forever. `ConnectTimeout` bounds the TCP/handshake wait;
+        // `ServerAlive*` kills a live connection that stops answering.
+        args += extraOptions
         if port > 0, port != 22 { args += ["-p", String(port)] }
         let key = identityFile.trimmingCharacters(in: .whitespacesAndNewlines)
         if !key.isEmpty { args += ["-i", (key as NSString).expandingTildeInPath] }

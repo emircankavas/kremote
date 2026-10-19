@@ -38,7 +38,7 @@ struct KRemoteApp: App {
         .commands {
             CommandGroup(after: .newItem) {
                 Button("SFTP…") {
-                    if let id = model.selectedNodeID { model.openSFTP(for: id) }
+                    if let id = model.selectedNodeID { model.showSFTP(for: id) }
                 }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
                 .disabled(model.selectedNodeID == nil)

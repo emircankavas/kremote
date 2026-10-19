@@ -4,6 +4,7 @@ import KRemoteCore
 
 struct ContentView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
 
     @State private var pendingPassphrase = ""
     @State private var showImportNotice = false
@@ -18,6 +19,14 @@ struct ContentView: View {
             DetailView()
         }
         .navigationTitle("KRemote")
+        // One place turns "show SFTP for a node" into a window. `openWindow` with
+        // a value raises the window already bound to that value, which is what
+        // makes a second invoke focus instead of duplicate.
+        .task {
+            model.openSFTPWindow = { nodeID in
+                openWindow(id: "sftp", value: nodeID)
+            }
+        }
         .toolbar {
             // Tabs centred in the window's title bar — the layout that worked.
             ToolbarItem(placement: .principal) {
@@ -89,21 +98,28 @@ extension UUID: @retroactive Identifiable {
     public var id: UUID { self }
 }
 
-/// The `#` (become root) and split-view controls, shown in the window title bar.
+/// The SFTP, `#` (become root) and split-view controls, shown in the window title bar.
 struct SessionToolbarItems: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openWindow) private var openWindow
+
+    /// SFTP for the session in focus; falls back to the sidebar selection so the
+    /// button also works with no terminal open.
+    private var sftpTarget: ConnectionNode.ID? {
+        guard let nodeID = model.focusedSession?.nodeID ?? model.selectedNodeID else { return nil }
+        guard let node = model.find(nodeID), node.supportsSSH else { return nil }
+        return nodeID
+    }
 
     var body: some View {
         Button {
-            guard let nodeID = model.focusedSession?.nodeID ?? model.selectedNodeID else { return }
-            model.openSFTP(for: nodeID)
-            openWindow(id: "sftp", value: nodeID)
+            guard let nodeID = sftpTarget else { return }
+            model.showSFTP(for: nodeID)
         } label: {
             Image(systemName: "folder.badge.gearshape")
         }
         .help("Browse this server's files over SFTP (⇧⌘S)")
-        .disabled((model.focusedSession?.nodeID ?? model.selectedNodeID) == nil)
+        .accessibilityLabel("Browse files over SFTP")
+        .disabled(sftpTarget == nil)
 
         Button {
             model.requestRoot()
@@ -111,6 +127,7 @@ struct SessionToolbarItems: View {
             Image(systemName: "number")
         }
         .help("Become root on the focused session (runs sudo -i)")
+        .accessibilityLabel("Become root")
         .disabled(model.focusedSession == nil)
 
         Button {

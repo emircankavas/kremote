@@ -275,6 +275,7 @@ final class AppModel {
         node.protocolName = draft.protocolName.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         node.identityFile = draft.identityFile.trimmingCharacters(in: .whitespacesAndNewlines)
         node.remoteCommand = draft.remoteCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        node.usesSudo = draft.usesSudo
         node.rdp = draft.rdp.isEmpty ? nil : draft.rdp
         node.password = draft.password
 
@@ -548,51 +549,85 @@ final class AppModel {
     // MARK: - SFTP
 
     /// Open SFTP windows, one per connection. Kept on the model so that asking
-    /// for the same connection twice focuses the existing window instead of
+    /// for the same connection twice raises the existing window instead of
     /// opening a second browser on the same server.
     private(set) var sftpSessions: [SFTPSession] = []
-    /// Set to make the window for this connection key and front.
-    var focusedSFTPNodeID: ConnectionNode.ID?
-    /// Bumped when a new SFTP window must be opened; the scene watches it.
-    private(set) var sftpRequest = 0
 
-    /// Opens (or focuses) the file browser for a connection.
+    /// The session for a connection, opening one if there is none yet.
     ///
     /// Works with no terminal open — the browser makes its own `ssh` connection,
     /// so it does not depend on a session having been started.
-    func openSFTP(for nodeID: ConnectionNode.ID) {
-        guard let node = find(nodeID), !node.isFolder else { return }
-        if sftpSessions.contains(where: { $0.nodeID == nodeID }) {
-            focusedSFTPNodeID = nodeID
-            sftpRequest += 1
-            return
-        }
+    func openSFTP(for nodeID: ConnectionNode.ID) -> SFTPSession? {
+        if let existing = sftpSession(for: nodeID) { return existing }
+        guard let node = find(nodeID), !node.isFolder else { return nil }
         hydrateCredentials(for: nodeID)
         guard let effective = effective(nodeID), !effective.host.isEmpty else {
             lastError = "This connection has no host set."
-            return
+            return nil
         }
-        let transport = ProcessSFTPTransport(
-            host: effective.host,
-            port: effective.port,
-            username: effective.username,
-            identityFile: effective.identityFile
-        )
-        let client = SFTPClient(transport: transport)
+        // The builder is captured, not the client: Retry after a lost connection
+        // needs a brand-new ssh process, which is what this closure makes.
+        // Only ever invoked from the main actor (openSFTP / reconnect), so it is
+        // not @Sendable and may read the node and the secret store.
+        let makeClient: () -> SFTPClient = {
+            let transport = ProcessSFTPTransport(
+                host: effective.host,
+                port: effective.port,
+                username: effective.username,
+                identityFile: effective.identityFile,
+                // Timeouts belong to ssh: a blocked pipe read cannot be cancelled
+                // from Swift, so without these a black-holed host would leave the
+                // window on "Connecting…" forever. ConnectTimeout bounds the
+                // handshake; ServerAlive* ends a session that stops answering.
+                extraOptions: [
+                    "-o", "ConnectTimeout=20",
+                    "-o", "ServerAliveInterval=15",
+                    "-o", "ServerAliveCountMax=3",
+                ]
+            )
+            // Elevation is per operation and only wired when the node opted in: the
+            // provider returns nil without the flag or without a usable password, and
+            // the base channel keeps serving everything the login user may do.
+            let sudoTarget = SudoTarget(
+                nodeID: nodeID,
+                host: effective.host,
+                port: effective.port,
+                username: effective.username,
+                identityFile: effective.identityFile,
+                usesSudo: node.usesSudo
+            )
+            let provider = SudoElevationProvider(target: sudoTarget, secretStore: self.secrets)
+            return SFTPClient(transport: transport, elevation: provider)
+        }
         let user = effective.username.isEmpty ? "" : "\(effective.username)@"
         let session = SFTPSession(
             nodeID: nodeID,
             title: node.name,
-            client: client,
-            target: "sftp://\(user)\(effective.host):\(effective.port)"
+            target: "sftp://\(user)\(effective.host):\(effective.port)",
+            makeClient: makeClient
         )
         sftpSessions.append(session)
-        focusedSFTPNodeID = nodeID
-        sftpRequest += 1
+        return session
     }
 
-    /// Called by the window when it closes.
+    /// Installed by the main window: turns "show SFTP for this node" into
+    /// `openWindow(id:value:)`, which raises an existing window for the same
+    /// node instead of stacking a second browser on the same server.
+    ///
+    /// The menu, the sidebar and the session toolbar all come through here, so
+    /// there is exactly one place that knows how a window is opened.
+    var openSFTPWindow: ((ConnectionNode.ID) -> Void)?
+
+    /// Opens the browser for a connection, or raises the one already open.
+    func showSFTP(for nodeID: ConnectionNode.ID) {
+        guard let session = openSFTP(for: nodeID) else { return }
+        openSFTPWindow?(session.nodeID)
+    }
+
+    /// Called by the window when it closes; drops the client with it.
     func closeSFTP(_ id: SFTPSession.ID) {
+        guard let session = sftpSessions.first(where: { $0.id == id }) else { return }
+        session.disconnect()
         sftpSessions.removeAll { $0.id == id }
     }
 

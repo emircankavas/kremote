@@ -3,7 +3,6 @@ import KRemoteCore
 
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openWindow) private var openWindow
 
     @State private var renameTarget: ConnectionNode.ID?
     @State private var renameDraft: String = ""
@@ -167,8 +166,7 @@ struct SidebarView: View {
     }
 
     private func openSFTP(_ node: ConnectionNode) {
-        model.openSFTP(for: node.id)
-        openWindow(id: "sftp", value: node.id)
+        model.showSFTP(for: node.id)
     }
 }
 

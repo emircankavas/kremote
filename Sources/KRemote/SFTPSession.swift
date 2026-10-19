@@ -4,110 +4,187 @@ import KRemoteCore
 
 /// One open SFTP window: a live client bound to a connection node.
 ///
-/// The window owns this object; closing the window disconnects the client. The
-/// model keeps no SFTP state of its own beyond the list of open sessions, so a
-/// connection's terminal and its file browser stay independent.
+/// The window owns this object; closing the window disconnects the client. All
+/// server I/O goes through `SFTPClient`, whose methods are nonisolated `async`,
+/// so a listing never runs on the main actor; every mutation of observable
+/// state comes back here.
 @MainActor
 @Observable
 final class SFTPSession: Identifiable {
+    /// A folder in the window's sidebar.
+    struct Shortcut: Identifiable, Hashable {
+        let name: String
+        let path: String
+        let icon: String
+        var id: String { path }
+    }
+
     let id = UUID()
     let nodeID: ConnectionNode.ID
 
-    /// Name shown in the window title.
-    private(set) var title: String
+    /// Connection name — the window title.
+    let title: String
+    /// `user@host:port`, shown in the status bar.
+    let target: String
 
-    /// Where the browser is looking. Always absolute once connected.
+    /// Where the browser is looking. `~` until the handshake resolves the home
+    /// directory; always absolute after that.
     private(set) var path: String = "~"
+    /// Everything the last listing returned, dot-files included. Filtering and
+    /// sorting are the views' business.
     private(set) var entries: [RemoteEntry] = []
+
+    private(set) var isConnecting = false
     private(set) var isLoading = false
-    /// Set when the last operation failed; shown inline with the server's text.
-    /// Writable so the window can surface a local notice (e.g. an unimplemented
-    /// gesture) without pretending the server said it.
-    var errorMessage: String?
-    /// True once the handshake with the server has completed.
+    /// True once the version handshake has completed.
     private(set) var isConnected = false
+    /// Set when an operation failed; always carries the server's own text.
+    var errorMessage: String?
+
+    /// Sidebar folders: Home/Root/tmp plus whatever mount roots the server has.
+    private(set) var shortcuts: [Shortcut] = [
+        Shortcut(name: "Home", path: "~", icon: "house"),
+        Shortcut(name: "Root", path: "/", icon: "internaldrive"),
+        Shortcut(name: "tmp", path: "/tmp", icon: "folder.badge.gearshape"),
+    ]
+
+    /// Builds a fresh client. `reconnect` needs one: an `SFTPClient` is
+    /// single-shot — once its ssh process is gone the object cannot be reused.
+    /// Called only from this (main-actor) object, so it is not `@Sendable`: the
+    /// builder reads credentials and the sudo flag from `AppModel`.
+    private let makeClient: () -> SFTPClient
+    private var client: SFTPClient
 
     /// Navigation history for ⌘[ / ⌘].
     private var history: [String] = []
     private var historyIndex = -1
 
-    let client: SFTPClient
-    /// How the connection was resolved, for the status bar.
-    let target: String
+    /// Rises with every listing. A reply that arrives after the user navigated
+    /// again is dropped instead of overwriting the newer directory.
+    private var loadToken = 0
+    private var homePath = "~"
 
-    init(nodeID: ConnectionNode.ID, title: String, client: SFTPClient, target: String) {
+    init(
+        nodeID: ConnectionNode.ID,
+        title: String,
+        target: String,
+        makeClient: @escaping () -> SFTPClient
+    ) {
         self.nodeID = nodeID
         self.title = title
-        self.client = client
         self.target = target
+        self.makeClient = makeClient
+        self.client = makeClient()
     }
 
     // MARK: - Connection
 
+    /// Opens the transport and shows the login user's home directory.
+    ///
+    /// Bounded by ssh itself: the transport is built with `ConnectTimeout` and
+    /// `ServerAlive*` (see `ProcessSFTPTransport`), because a blocked pipe read
+    /// cannot be interrupted from Swift — a `Task` timeout around it would hang
+    /// just the same. A black-holed host therefore fails with ssh's own message
+    /// instead of a permanent "Connecting…".
     func connect() async {
-        guard !isConnected else { return }
+        guard !isConnected, !isConnecting else { return }
+        isConnecting = true
         isLoading = true
         errorMessage = nil
         do {
             try await client.connect()
             isConnected = true
-            // Start at the login user's home directory, resolved by the server.
+            // The home directory is the server's answer, never a guess at $HOME.
             let home = try await client.realpath(".")
-            path = home
-            visit(home, resetHistory: true)
-            await reload()
+            homePath = home
+            shortcuts[0] = Shortcut(name: "Home", path: home, icon: "house")
+            resetHistory(to: home)
+            await load()
+            await probeMounts()
         } catch {
+            // Terminating the child closes the pipes, so nothing is left running
+            // behind a failed connect.
+            client.disconnect()
+            isConnected = false
             errorMessage = Self.describe(error)
         }
         isLoading = false
+        isConnecting = false
     }
 
-    /// Reopens the transport after a failure (the sheet's "Reconnect").
+    /// Reopens the transport — the Retry behind every error state. The dead
+    /// client is replaced rather than reused, because its ssh process is gone.
     func reconnect() async {
         client.disconnect()
+        client = makeClient()
         isConnected = false
+        isConnecting = false
+        isLoading = false
         await connect()
     }
 
     func disconnect() {
         client.disconnect()
         isConnected = false
+        isConnecting = false
+        isLoading = false
+    }
+
+    // MARK: - Listing
+
+    /// Re-reads the current directory.
+    func load() async {
+        guard isConnected else { return }
+        loadToken += 1
+        let token = loadToken
+        isLoading = true
+        do {
+            let listing = try await client.list(path)
+            guard token == loadToken else { return }
+            entries = listing
+            errorMessage = nil
+        } catch {
+            guard token == loadToken else { return }
+            entries = []
+            errorMessage = Self.describe(error)
+            // A dead transport cannot be reused; the error state's Retry builds
+            // a fresh client instead of pretending the old one still works.
+            if case .connectionClosed = error as? SFTPError ?? .invalidArgument("") {
+                isConnected = false
+            }
+        }
+        if token == loadToken { isLoading = false }
     }
 
     // MARK: - Navigation
 
-    func reload() async {
-        guard isConnected, !isLoading else { return }
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            entries = try await client.list(path)
-            errorMessage = nil
-        } catch {
-            entries = []
-            errorMessage = Self.describe(error)
-        }
-    }
-
-    func enter(_ entry: RemoteEntry) {
+    /// Double-click / Return on a row. A file is a no-op in this card; card 5
+    /// wires open and download.
+    func open(_ entry: RemoteEntry) async {
         guard entry.isDirectory else { return }
-        visit(entry.path)
-        Task { await reload() }
+        await go(to: entry.path)
     }
 
-    func go(to destination: String) {
-        let target = destination.hasPrefix("/") || destination.hasPrefix("~")
-            ? destination
-            : SFTPClient.join(path, destination)
+    func go(to destination: String) async {
+        let trimmed = destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let target: String
+        if trimmed == "~" {
+            target = homePath
+        } else if trimmed.hasPrefix("/") {
+            target = SFTPClient.normalise(trimmed)
+        } else {
+            target = SFTPClient.join(path, trimmed)
+        }
         visit(target)
-        Task { await reload() }
+        await load()
     }
 
-    func goUp() {
+    func goUp() async {
         let parent = SFTPClient.parent(of: path)
         guard parent != path else { return }
         visit(parent)
-        Task { await reload() }
+        await load()
     }
 
     var canGoUp: Bool { path != "/" }
@@ -115,36 +192,42 @@ final class SFTPSession: Identifiable {
     var canGoBack: Bool { historyIndex > 0 }
     var canGoForward: Bool { historyIndex >= 0 && historyIndex < history.count - 1 }
 
-    func goBack() {
+    func goBack() async {
         guard canGoBack else { return }
         historyIndex -= 1
         path = history[historyIndex]
-        Task { await reload() }
+        await load()
     }
 
-    func goForward() {
+    func goForward() async {
         guard canGoForward else { return }
         historyIndex += 1
         path = history[historyIndex]
-        Task { await reload() }
+        await load()
     }
 
-    /// Records a visit, truncating any forward history — the same rule every
-    /// browser uses, so back/forward never points at a branch you left.
-    private func visit(_ destination: String, resetHistory: Bool = false) {
+    /// Records a visit, truncating any forward history — the rule every browser
+    /// uses, so back/forward never points at a branch the user left.
+    private func visit(_ destination: String) {
         let normalised = SFTPClient.normalise(destination)
-        if resetHistory {
-            history = [normalised]
-            historyIndex = 0
-        } else if historyIndex >= 0, history[safe: historyIndex] == normalised {
+        if historyIndex >= 0, history[safe: historyIndex] == normalised {
+            path = normalised
             return
-        } else {
-            history = Array(history.prefix(historyIndex + 1))
-            history.append(normalised)
-            historyIndex = history.count - 1
         }
+        history = Array(history.prefix(historyIndex + 1))
+        history.append(normalised)
+        historyIndex = history.count - 1
         path = normalised
     }
+
+    private func resetHistory(to destination: String) {
+        let normalised = SFTPClient.normalise(destination)
+        history = [normalised]
+        historyIndex = 0
+        path = normalised
+    }
+
+    // MARK: - Breadcrumbs
 
     /// Breadcrumb components, each with the absolute path that leads to it.
     var breadcrumbs: [(name: String, path: String)] {
@@ -158,15 +241,68 @@ final class SFTPSession: Identifiable {
         return result
     }
 
-    /// Shortcuts shown in the sidebar. Only paths the server actually has are
-    /// offered, so a Linux box does not get a `/Volumes` that cannot exist.
-    var shortcuts: [(name: String, path: String, icon: String)] {
-        [
-            ("Home", "~", "house"),
-            ("Root", "/", "internaldrive"),
-            ("tmp", "/tmp", "folder.badge.gearshape"),
-        ]
+    /// Mount roots the server actually exposes, appended to the sidebar:
+    /// `/Volumes` children on macOS, `/mnt` and `/media` on Linux. Probed once,
+    /// so a Linux box is never offered a `/Volumes` that cannot exist.
+    private func probeMounts() async {
+        var mounts: [Shortcut] = []
+        for root in ["/Volumes", "/mnt", "/media"] {
+            guard let children = try? await client.list(root) else { continue }
+            for child in children where child.isDirectory {
+                mounts.append(Shortcut(name: child.name, path: child.path, icon: "externaldrive"))
+            }
+        }
+        guard !mounts.isEmpty else { return }
+        shortcuts = Array(shortcuts.prefix(3)) + mounts
     }
+
+    // MARK: - Rows the views draw
+
+    /// Filters and sorts the current listing — one implementation for both
+    /// views and for tests.
+    ///
+    /// Directories always come first (Finder's rule); then the chosen column,
+    /// ascending or descending, with ties broken by name so a sort never
+    /// shuffles equal rows around.
+    func rows(
+        showHidden: Bool,
+        sortColumn: SFTPSortColumn = .name,
+        ascending: Bool = true
+    ) -> [RemoteEntry] {
+        let filtered = showHidden ? entries : entries.filter { !$0.name.hasPrefix(".") }
+        return filtered.sorted { a, b in
+            if a.isDirectory != b.isDirectory { return a.isDirectory }
+            let comparison: ComparisonResult
+            switch sortColumn {
+            case .name:
+                comparison = a.name.localizedStandardCompare(b.name)
+            case .size:
+                comparison = Self.compare(a.size ?? 0, b.size ?? 0, a.name, b.name)
+            case .modified:
+                comparison = Self.compare(
+                    a.modified?.timeIntervalSince1970 ?? 0,
+                    b.modified?.timeIntervalSince1970 ?? 0,
+                    a.name, b.name
+                )
+            case .permissions:
+                comparison = Self.compare(a.permissions ?? 0, b.permissions ?? 0, a.name, b.name)
+            case .owner:
+                comparison = Self.compare(
+                    a.attributes.uid ?? 0, b.attributes.uid ?? 0, a.name, b.name
+                )
+            }
+            return ascending ? comparison == .orderedAscending : comparison == .orderedDescending
+        }
+    }
+
+    private static func compare<T: Comparable>(
+        _ a: T, _ b: T, _ nameA: String, _ nameB: String
+    ) -> ComparisonResult {
+        if a == b { return nameA.localizedStandardCompare(nameB) }
+        return a < b ? .orderedAscending : .orderedDescending
+    }
+
+    // MARK: - Display helpers
 
     /// The server's own words where there are any — never a generic "failed".
     static func describe(_ error: Error) -> String {
