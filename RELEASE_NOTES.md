@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 4
+## KRemote 1.8.0 beta 5
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -17,6 +17,15 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### Fixed: SFTP hanging on "Connecting…" with no error
+
+beta 4 could sit on "Connecting to sftp://…" forever when a server accepted the
+connection and then never answered — there was no timeout anywhere, so there was
+nothing to show. Every wait is now bounded: the window gives up after 25 seconds
+with the reason, and the connecting screen explains what it is doing and offers
+**Cancel**. ssh's "Permanently added … to the list of known hosts" boilerplate is
+no longer glued onto the front of error messages.
 
 ### Fixed: signing in to SFTP with a password
 
@@ -76,7 +85,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.4 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.5 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not
