@@ -146,6 +146,31 @@ final class SFTPElevationTests: XCTestCase {
         XCTAssertFalse(command.contains(password))
     }
 
+    /// The command is handed to `sh -c` on the server, so a syntax error is a
+    /// failed elevation with bash's own message and nothing else. This caught a
+    /// real one: building the program by joining fragments with "; " produced
+    /// `then;`, which bash rejects before running a single line.
+    func testRemoteCommandIsValidShell() throws {
+        let command = ElevationCommand.remoteCommand
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // `-n` parses without executing, so nothing here can touch the machine.
+        process.arguments = ["-n", "-c", command]
+        let stderr = Pipe()
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+        let message = String(
+            decoding: stderr.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self
+        )
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            "shell syntax error: \(message)" + "\ncommand:\n" + command
+        )
+    }
+
     // MARK: Password line
 
     func testPasswordIsWrittenFirstAsOneLineAndNeverAppearsInErrors() async throws {

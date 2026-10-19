@@ -145,25 +145,31 @@ public enum ElevationCommand {
     /// one explanatory line to stderr and exits non-zero, so the caller has
     /// something to show instead of a silent hang.
     public static var remoteCommand: String {
-        let candidates = candidatePaths.map { "\"\($0)\"" }.joined(separator: " ")
-        return [
-            "p=''",
-            "for c in \(candidates); do if [ -x \"$c\" ]; then p=\"$c\"; break; fi; done",
-            "if [ -z \"$p\" ]; then p=$(command -v sftp-server 2>/dev/null); fi",
-            "if [ -z \"$p\" ]; then p=$(awk '/^[ \\t]*Subsystem[ \\t]+sftp[ \\t]/{print $3; exit}' /etc/ssh/sshd_config 2>/dev/null); fi",
-            "if [ -z \"$p\" ] || [ \"$p\" = internal-sftp ]; then",
-            // `internal-sftp` is a subsystem built into sshd, not a file on disk.
-            // Running `sshd -i -s sftp` speaks the same protocol from the binary
-            // that is always installed, which is the only way to elevate on a
-            // server configured that way (Debian/Ubuntu's default, and many
-            // hardened hosts). Without this the retry gave up on "no sftp-server
-            // binary found" even though sudo itself worked.
-            "  if command -v sshd >/dev/null 2>&1; then "
-                + "exec sudo -S -p '' \"$(command -v sshd)\" -i -s sftp; fi",
-            "  echo 'sftp-server: this server uses internal-sftp and has no sshd binary on PATH' >&2; "
-                + "exit 127; fi",
-            "exec sudo -S -p '' \"$p\"",
-        ].joined(separator: "; ")
+        let candidates = candidatePaths.map { "\"" + $0 + "\"" }.joined(separator: " ")
+        // One shell program, written as statements rather than glued with "; ":
+        // joining a fragment that already ends in `then` with a separator produces
+        // `then;` — a syntax error bash reports before anything else runs.
+        //
+        // `internal-sftp` is a subsystem built into sshd, not a file on disk, so
+        // the elevation for those hosts is `sshd -i -s sftp` (Debian/Ubuntu's
+        // default configuration, and many hardened servers). A server with a real
+        // sftp-server binary keeps using it.
+        return """
+        p=''
+        for c in \(candidates); do
+          if [ -x "$c" ]; then p="$c"; break; fi
+        done
+        if [ -z "$p" ]; then p=$(command -v sftp-server 2>/dev/null); fi
+        if [ -z "$p" ]; then p=$(awk '/^[ \\t]*Subsystem[ \\t]+sftp[ \\t]/{print $3; exit}' /etc/ssh/sshd_config 2>/dev/null); fi
+        if [ -z "$p" ] || [ "$p" = internal-sftp ]; then
+          if command -v sshd >/dev/null 2>&1; then
+            exec sudo -S -p '' "$(command -v sshd)" -i -s sftp
+          fi
+          echo 'sftp-server: this server uses internal-sftp and has no sshd binary on PATH' >&2
+          exit 127
+        fi
+        exec sudo -S -p '' "$p"
+        """
     }
 }
 
