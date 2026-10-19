@@ -138,7 +138,10 @@ final class SFTPElevationTests: XCTestCase {
         XCTAssertTrue(command.contains("command -v sftp-server"))
         XCTAssertTrue(command.contains("sshd_config"))
         // A missing binary must say so on stderr rather than exit silently.
-        XCTAssertTrue(command.contains("no sftp-server binary found") )
+        XCTAssertTrue(command.contains("internal-sftp"))
+        // A server whose sshd_config says internal-sftp has no separate binary;
+        // the retry has to fall back to `sshd -i -s sftp` instead of giving up.
+        XCTAssertTrue(command.contains("\"$(command -v sshd)\" -i -s sftp"))
         // Nothing in the command may carry a password.
         XCTAssertFalse(command.contains(password))
     }

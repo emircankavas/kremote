@@ -30,8 +30,8 @@ settings:
   base:
     # Beta line. `main` keeps the shipped 1.7.11 until 1.8.0 is promoted; the
     # release workflow stamps the exact tag into the built bundle anyway.
-    MARKETING_VERSION: "1.8.0-beta.9"
-    CURRENT_PROJECT_VERSION: "38"
+    MARKETING_VERSION: "1.8.0-beta.10"
+    CURRENT_PROJECT_VERSION: "39"
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: minimal
     DEAD_CODE_STRIPPING: "YES"

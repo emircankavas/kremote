@@ -340,10 +340,10 @@ extension SFTPClient {
         var done: Int64 = 0
         for entry in entries {
             if isCancelled?() == true { throw TransferCancelled() }
-            let suffix = String(entry.path.dropFirst(root.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            let destination = suffix.isEmpty
+            let relative = Self.relativeComponents(of: entry.path, under: root).joined(separator: "/")
+            let destination = relative.isEmpty
                 ? localDirectory
-                : localDirectory.appendingPathComponent(suffix)
+                : localDirectory.appendingPathComponent(relative)
             if entry.isDirectory {
                 try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
                 continue
@@ -382,7 +382,8 @@ extension SFTPClient {
         var done: Int64 = 0
         for file in files {
             if isCancelled?() == true { throw TransferCancelled() }
-            let suffix = String(file.relativePath.dropFirst())
+            let suffix = file.relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard !suffix.isEmpty else { throw SFTPError.invalidArgument("empty relative path for \(file.url.lastPathComponent)") }
             let remoteFile = Self.join(root, suffix)
             let remoteDirectory = Self.parent(of: remoteFile)
             if remoteDirectory != root, !createdDirectories.contains(remoteDirectory) {
@@ -514,6 +515,30 @@ extension SFTPClient {
     /// paths where the original error is the one worth reporting.
     static func removeQuietly(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
+    }
+
+    /// `["a", "b", "two.txt"]` for `/srv/tree` under `/srv`; `[]` for the root itself.
+    ///
+    /// Done by comparing components rather than string prefixes: a caller's path
+    /// may have gone through a symlink (`/tmp` → `/private/tmp` on macOS), and
+    /// `dropFirst(root.count)` silently produces a truncated name when the two
+    /// strings disagree about that. It returns nil-ish ([]) instead of a wrong path.
+    static func relativeComponents(of path: String, under root: String) -> [String] {
+        let child = normalise(path).split(separator: "/").map(String.init)
+        let parent = normalise(root).split(separator: "/").map(String.init)
+        guard child.count >= parent.count, Array(child.prefix(parent.count)) == parent else {
+            // Not under this root at all: use the last component rather than
+            // inventing a path, so a file still lands in a folder of its own name.
+            return child.last.map { [$0] } ?? []
+        }
+        return Array(child.dropFirst(parent.count))
+    }
+
+    /// Whether `path` is inside `root` (or is `root` itself).
+    static func isInside(_ path: String, root: String) -> Bool {
+        let child = normalise(path).split(separator: "/").map(String.init)
+        let parent = normalise(root).split(separator: "/").map(String.init)
+        return child.count >= parent.count && Array(child.prefix(parent.count)) == parent
     }
 
     struct LocalFile {
