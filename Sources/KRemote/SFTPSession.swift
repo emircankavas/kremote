@@ -112,6 +112,17 @@ final class SFTPSession: Identifiable {
         isConnecting = false
     }
 
+    /// The window shows this while the handshake runs, so a slow server is
+    /// visibly working rather than indistinguishable from a hang, and the user
+    /// can stop waiting.
+    func cancelConnect() {
+        client.disconnect()
+        isConnecting = false
+        isLoading = false
+        isConnected = false
+        errorMessage = "Connection cancelled."
+    }
+
     /// Reopens the transport — the Retry behind every error state. The dead
     /// client is replaced rather than reused, because its ssh process is gone.
     func reconnect() async {

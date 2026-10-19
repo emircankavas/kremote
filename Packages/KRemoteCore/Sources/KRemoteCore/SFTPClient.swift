@@ -40,9 +40,10 @@ public protocol ElevationProvider: AnyObject, Sendable {
 /// keeps the state machine small; pipelining can come later without changing the
 /// API.
 ///
-/// Every operation that can be refused by the server goes through
-/// `perform`, which retries *once* on an elevated transport when the failure is
-/// `permissionDenied` and an `ElevationProvider` is present.
+/// Every wait for the server is bounded (`replyTimeout`). The transport's `read`
+/// is a blocking call that cannot be cancelled from Swift, so a server that
+/// accepts the TCP connection and then says nothing would otherwise leave the
+/// window on "Connecting…" forever with no error to show.
 public final class SFTPClient: @unchecked Sendable {
     private var transport: SFTPTransport
     private let elevation: ElevationProvider?
@@ -54,6 +55,10 @@ public final class SFTPClient: @unchecked Sendable {
     private var readBuffer: [UInt8] = []
     private var serverVersion: UInt32 = 0
     private var isOpen = false
+    /// How long to wait for any single reply. Generous enough for a slow link and
+    /// a large directory, short enough that a silent server is reported rather
+    /// than waited on forever.
+    private var replyTimeout: TimeInterval = 25
 
     public init(transport: SFTPTransport, elevation: ElevationProvider? = nil) {
         self.transport = transport
@@ -93,7 +98,9 @@ public final class SFTPClient: @unchecked Sendable {
     // MARK: - Requests
 
     /// Sends one request and returns its reply payload.
-    private func request(type: SFTPPacketType, payload: [UInt8]) async throws -> SFTPFraming.Packet {
+    /// Sends one request and returns its reply. Internal so the transfer
+    /// engine shares one request/id state machine with the client.
+    func request(type: SFTPPacketType, payload: [UInt8]) async throws -> SFTPFraming.Packet {
         guard lock.withLock({ isOpen }) else {
             throw SFTPError.connectionClosed("not connected")
         }
@@ -116,6 +123,11 @@ public final class SFTPClient: @unchecked Sendable {
     }
 
     /// Reads one complete packet, buffering whatever the transport returns.
+    ///
+    /// The transport's `read` blocks until bytes arrive, and it cannot be
+    /// cancelled from Swift. It therefore runs on a background queue and the wait
+    /// is bounded here: a server that never answers produces a typed error
+    /// instead of a window stuck on "Connecting…".
     private func receive() async throws -> SFTPFraming.Packet {
         while true {
             let buffered = lock.withLock { readBuffer }
@@ -123,7 +135,8 @@ public final class SFTPClient: @unchecked Sendable {
                 lock.withLock { readBuffer.removeFirst(parsed.1) }
                 return parsed.0
             }
-            guard let chunk = try transport.read(maxLength: 64 * 1024) else {
+            let chunk = try await readChunk()
+            guard let chunk else {
                 let reason = transport.stderrText().trimmingCharacters(in: .whitespacesAndNewlines)
                 throw SFTPError.connectionClosed(reason.isEmpty ? "the server closed the connection" : reason)
             }
@@ -131,8 +144,42 @@ public final class SFTPClient: @unchecked Sendable {
         }
     }
 
+    /// One bounded read. `nil` means the peer closed the pipe.
+    private func readChunk() async throws -> Data? {
+        let transport = self.transport
+        let timeout = self.replyTimeout
+
+        return try await withCheckedThrowingContinuation { continuation in
+            // A dedicated queue per read: the call blocks, and the continuation is
+            // resumed exactly once — either with the bytes or by the timeout.
+            let resumed = NSLock()
+            var hasResumed = false
+            func finish(_ result: Result<Data?, Error>) {
+                resumed.withLock {
+                    guard !hasResumed else { return }
+                    hasResumed = true
+                }
+                continuation.resume(with: result)
+            }
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    finish(.success(try transport.read(maxLength: 64 * 1024)))
+                } catch {
+                    finish(.failure(error))
+                }
+            }
+
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                finish(.failure(SFTPError.connectionClosed(
+                    "the server did not answer within \(Int(timeout))s"
+                )))
+            }
+        }
+    }
+
     /// Interprets a STATUS reply, throwing for anything but OK/EOF.
-    private func checkStatus(_ packet: SFTPFraming.Packet, allowEOF: Bool = false) throws {
+    func checkStatus(_ packet: SFTPFraming.Packet, allowEOF: Bool = false) throws {
         guard packet.type == .status else {
             throw SFTPError.malformedPacket("expected STATUS, got \(packet.type)")
         }
@@ -162,7 +209,10 @@ public final class SFTPClient: @unchecked Sendable {
     ///   `elevationFailed` surfaces and nothing else is tried;
     /// * the elevated channel starts but refuses the operation too → that is
     ///   reported as `elevationFailed` so the UI shows the server's own words.
-    private func perform<T>(
+    /// Retries one operation on the elevated channel when the login user is
+    /// refused. Internal (not private) so the transfer engine reuses the same
+    /// rule instead of reimplementing elevation.
+    func perform<T>(
         path: String,
         _ operation: (SFTPClient) async throws -> T
     ) async throws -> T {
@@ -312,7 +362,7 @@ public final class SFTPClient: @unchecked Sendable {
         throw SFTPError.status(code, message: (try? reader.string()) ?? "")
     }
 
-    private func closeHandle(_ handle: [UInt8]) async throws {
+    func closeHandle(_ handle: [UInt8]) async throws {
         let reply = try await request(type: .close, payload: SFTPRequests.close(handle: handle))
         if reply.type == .status { try? checkStatus(reply) }
     }

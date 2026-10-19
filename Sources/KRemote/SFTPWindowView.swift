@@ -400,12 +400,17 @@ struct SFTPWindowView: View {
     }
 
     private var connectingView: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             ProgressView()
                 .controlSize(.large)
             Text("Connecting to \(session.target)…")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+            Text("Signing in with the saved password or key. This gives up after 25 seconds.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            Button("Cancel") { session.cancelConnect() }
+                .controlSize(.small)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

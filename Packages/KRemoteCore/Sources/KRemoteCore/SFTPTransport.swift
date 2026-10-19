@@ -274,7 +274,22 @@ public final class ProcessSFTPTransport: SFTPTransport, @unchecked Sendable {
 
     public func stderrText() -> String {
         let text = bufferLock.withLock { String(decoding: stderrBuffer, as: UTF8.self) }
-        return text
+        return Self.cleanDiagnostics(text)
+    }
+
+    /// Strips the lines ssh prints on every successful contact ("Warning:
+    /// Permanently added … to the list of known hosts") so an error message shows
+    /// the reason and not the boilerplate above it.
+    static func cleanDiagnostics(_ text: String) -> String {
+        let noise = ["warning: permanently added", "warning: added the"]
+        let kept = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { line in
+                let lower = line.lowercased()
+                return !lower.isEmpty && !noise.contains(where: { lower.hasPrefix($0) })
+            }
+        return kept.joined(separator: "\n")
     }
 
     public static var sshPath: String {
