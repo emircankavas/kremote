@@ -57,6 +57,14 @@ jobs:
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
           echo "Releasing $TAG (channel=$CHANNEL)"
 
+      - name: Check the tag is on the right branch
+        run: |
+          set -o pipefail
+          # A pre-release tag belongs to beta, a stable tag to main. Fetch both so
+          # the check works on a tag-only checkout.
+          git fetch --no-tags origin main beta || true
+          python3 scripts/check-release-branch.py "${{ steps.version.outputs.tag }}"
+
       - name: Install XcodeGen
         run: |
           set -o pipefail
