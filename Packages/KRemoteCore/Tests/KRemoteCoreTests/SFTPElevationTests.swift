@@ -130,18 +130,23 @@ final class SFTPElevationTests: XCTestCase {
     func testRemoteCommandRunsSudoWithStdoutPasswordAndPathDetection() {
         let command = ElevationCommand.remoteCommand
         XCTAssertTrue(command.contains("sudo -S -p ''"))
-        XCTAssertTrue(command.hasSuffix("exec sudo -S -p '' \"$p\""))
-        // Both platform layouts are probed, PATH is the fallback, sshd_config the
-        // last resort — never a hard-coded single path.
+        // sudo runs a shell that locates the binary and execs it, so the elevated
+        // process ends up being the subsystem itself.
+        XCTAssertTrue(command.hasSuffix("exec \"$p\"'"))
+        // Every distribution layout is probed, PATH is the fallback, and then the
+        // server's own effective config — never a single hard-coded path.
         XCTAssertTrue(command.contains("/usr/libexec/sftp-server"))
         XCTAssertTrue(command.contains("/usr/lib/openssh/sftp-server"))
         XCTAssertTrue(command.contains("command -v sftp-server"))
-        XCTAssertTrue(command.contains("sshd_config"))
+        XCTAssertTrue(command.contains("sshd -T"))
         // A missing binary must say so on stderr rather than exit silently.
-        XCTAssertTrue(command.contains("internal-sftp"))
-        // A server whose sshd_config says internal-sftp has no separate binary;
-        // the retry has to fall back to `sshd -i -s sftp` instead of giving up.
-        XCTAssertTrue(command.contains("\"$(command -v sshd)\" -i -s sftp"))
+        // The path detection has to cover every distribution layout, and then ask
+        // the server's own effective config rather than guessing.
+        XCTAssertTrue(command.contains("/usr/libexec/openssh/sftp-server"))
+        XCTAssertTrue(command.contains("sshd -T"))
+        // `sshd` has no `-s` option; that guess made every elevation fail with a
+        // usage message before sudo even ran.
+        XCTAssertFalse(command.contains("-i -s sftp"))
         // Nothing in the command may carry a password.
         XCTAssertFalse(command.contains(password))
     }

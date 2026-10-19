@@ -130,46 +130,54 @@ public struct ElevationFailure: Sendable, Equatable {
 /// wrong on at least one platform in daily use (macOS ships
 /// `/usr/libexec/sftp-server`, Debian/Ubuntu `/usr/lib/openssh/sftp-server`).
 public enum ElevationCommand {
-    /// Candidate absolute paths, tried in order before falling back to PATH and
-    /// then to `sshd_config`'s `Subsystem sftp` line.
+    /// Candidate absolute paths, tried in order before falling back to PATH,
+    /// sshd's effective configuration, and finally a search.
+    ///
+    /// The layouts differ by distribution: macOS `/usr/libexec`, Debian/Ubuntu
+    /// `/usr/lib/openssh`, RHEL/Fedora/Alma `/usr/libexec/openssh`.
     public static let candidatePaths = [
         "/usr/libexec/sftp-server",
         "/usr/lib/openssh/sftp-server",
+        "/usr/libexec/openssh/sftp-server",
+        "/usr/lib/ssh/sftp-server",
+        "/usr/lib64/openssh/sftp-server",
+        "/usr/lib64/misc/sftp-server",
     ]
 
     /// The command string handed to `ssh` as a single argument.
     ///
-    /// `sudo -S -p ''` reads the password from stdin with no prompt text (so
-    /// nothing prompt-like can ever land in the protocol stream), and `exec`
-    /// keeps the same stdin/stdout for the subsystem. Every failure path writes
-    /// one explanatory line to stderr and exits non-zero, so the caller has
-    /// something to show instead of a silent hang.
+    /// Everything after the password line runs **as root** inside one `sudo -S`,
+    /// so root-only sources of truth are available: `sshd -T` prints the
+    /// effective configuration, which is the only reliable way to learn where
+    /// `sftp-server` lives on a host whose layout is not one of the candidates.
+    ///
+    /// Note there is no `sshd -i -s sftp`: `sshd` has no `-s` option. Servers
+    /// configured `internal-sftp` still ship a real `sftp-server` binary with the
+    /// package, which is what this finds.
     public static var remoteCommand: String {
-        let candidates = candidatePaths.map { "\"" + $0 + "\"" }.joined(separator: " ")
-        // One shell program, written as statements rather than glued with "; ":
-        // joining a fragment that already ends in `then` with a separator produces
-        // `then;` — a syntax error bash reports before anything else runs.
-        //
-        // `internal-sftp` is a subsystem built into sshd, not a file on disk, so
-        // the elevation for those hosts is `sshd -i -s sftp` (Debian/Ubuntu's
-        // default configuration, and many hardened servers). A server with a real
-        // sftp-server binary keeps using it.
-        return """
-        p=''
-        for c in \(candidates); do
+        // Written as one shell program, single-quoted for `sh -c`, so it contains
+        // no single quotes of its own. Joining fragments with "; " produced
+        // `then;` once, which bash rejects before running a thing.
+        let script = """
+        p=""
+        for c in \(candidatePaths.joined(separator: " ")); do
           if [ -x "$c" ]; then p="$c"; break; fi
         done
         if [ -z "$p" ]; then p=$(command -v sftp-server 2>/dev/null); fi
-        if [ -z "$p" ]; then p=$(awk '/^[ \\t]*Subsystem[ \\t]+sftp[ \\t]/{print $3; exit}' /etc/ssh/sshd_config 2>/dev/null); fi
-        if [ -z "$p" ] || [ "$p" = internal-sftp ]; then
-          if command -v sshd >/dev/null 2>&1; then
-            exec sudo -S -p '' "$(command -v sshd)" -i -s sftp
-          fi
-          echo 'sftp-server: this server uses internal-sftp and has no sshd binary on PATH' >&2
+        if [ -z "$p" ]; then
+          s=$(sshd -T 2>/dev/null | grep -i "^subsystem" | cut -d" " -f3 | head -1)
+          if [ -n "$s" ] && [ "$s" != internal-sftp ] && [ -x "$s" ]; then p="$s"; fi
+        fi
+        if [ -z "$p" ]; then
+          p=$(find /usr /opt -maxdepth 6 -type f -name sftp-server -perm -u+x 2>/dev/null | head -1)
+        fi
+        if [ -z "$p" ]; then
+          echo "sftp-server: no sftp-server binary found (checked common paths, PATH, sshd -T, and /usr + /opt)" >&2
           exit 127
         fi
-        exec sudo -S -p '' "$p"
+        exec "$p"
         """
+        return "exec sudo -S -p '' /bin/sh -c '" + script + "'"
     }
 }
 
