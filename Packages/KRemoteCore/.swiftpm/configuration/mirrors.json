@@ -3,6 +3,18 @@
     {
       "original": "https://github.com/apple/swift-asn1.git",
       "mirror": "https://forgejo.kavas.dev/emircan/swift-asn1.git"
+    },
+    {
+      "original": "https://github.com/apple/swift-argument-parser",
+      "mirror": "https://forgejo.kavas.dev/emircan/swift-argument-parser.git"
+    },
+    {
+      "original": "https://github.com/apple/swift-docc-plugin",
+      "mirror": "https://forgejo.kavas.dev/emircan/swift-docc-plugin.git"
+    },
+    {
+      "original": "https://github.com/swiftlang/swift-docc-symbolkit",
+      "mirror": "https://forgejo.kavas.dev/emircan/swift-docc-symbolkit.git"
     }
   ],
   "version": 1
