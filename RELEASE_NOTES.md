@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 8
+## KRemote 1.8.0 beta 9
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -17,6 +17,19 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### Fixed: sudo was not tried automatically
+
+Automatic elevation was implemented but switched **off by default**, so a folder
+you have no permission for just reported "permission denied". It is now on by
+default: when an operation is refused and the connection has a saved password,
+KRemote retries that one operation over a second `ssh` connection running the
+sftp subsystem under `sudo`. The rest of the session stays unprivileged.
+
+It still needs two things on your side — the password saved on the connection,
+and real `sudo` rights for that user — and if either is missing you get the
+original refusal plus the reason. The per-connection switch (Edit → SFTP) now
+reads "Retry refused file operations with sudo" and is on unless you turn it off.
 
 ### New: download, upload and file operations
 
@@ -126,7 +139,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.8 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.9 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not
