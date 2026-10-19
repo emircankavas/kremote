@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 2
+## KRemote 1.8.0 beta 3
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -18,19 +18,33 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
 
-### New: SFTP engine (no window yet)
+### New: an SFTP file browser
 
-The SFTP v3 client that the file browser will use is in place: connect over the
-system `ssh`, list directories, download and upload, mkdir/rmdir/remove/rename,
-chmod, realpath.
+A Finder-like window for the server's files, opened two ways:
 
-Verified against a live OpenSSH server end to end: connect, resolve `~`, list an
-88-entry home directory, write a file, read it back, stat, chmod 600, rename,
-delete. Elevation is wired as a seam: a permission failure retries the same
-operation once on a privileged `sudo` transport, and never loops.
+- **Toolbar button** (top right, folder-with-gear icon) in a connected SSH
+  session — browses that session's server.
+- **Right-click any connection → Connect ▸ SFTP** — works with no terminal open.
+- **⇧⌘S** from the main window browses the selected connection.
 
-**What you cannot do yet:** there is no SFTP window, no toolbar button and no
-Connect ▸ SFTP menu item. That arrives in the next beta.
+One window per connection; asking again raises the existing one rather than
+opening a second browser on the same server.
+
+The window has back/forward (⌘[ ⌘]), enclosing folder (⌘↑), a clickable
+breadcrumb, Go to Folder (⌘G), reload (⌘R), a Places sidebar, and **list and
+icon views** with the toggle remembered. List view sorts by name, size, modified
+or permissions and shows `-rw-r--r--`-style permissions. Icons are the real macOS
+document icons. Connection state, the resolved target and the item count sit in
+the status bar; errors show the server's own text, not "operation failed".
+
+The engine underneath was verified against a live OpenSSH server end to end:
+connect, resolve `~`, list an 88-entry home directory, write a file, read it back,
+stat, chmod 600, rename, delete.
+
+**Not in this build yet:** download/upload, new folder, rename, delete and the
+permissions sheet (the file operations), and automatic `sudo` elevation. Those
+are the next beta. Drag-and-drop upload says so explicitly rather than silently
+doing nothing.
 
 ### Install
 
@@ -45,10 +59,11 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Stable: it should say you are up to date (1.8.0 has
-   not shipped).
-2. Switch to **Beta**: it should offer 1.8.0-beta.2 and install it.
-3. After relaunch, switch back to **Stable** and check again — it should not
-   offer the beta again.
-4. Existing SSH and RDP sessions, tabs, split view and stored passwords must
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.3 and install it.
+2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
+   directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
+3. Open SFTP for the same connection again: it should raise the same window, not
+   open a second one.
+4. In an SSH session, the toolbar's folder button should browse that server.
+5. Existing SSH and RDP sessions, tabs, split view and stored passwords must
    behave exactly as in 1.7.11.
