@@ -24,7 +24,7 @@ packages:
   # fork's `v1.20.0-forgejo` tag is upstream v1.20.0 with only those URLs edited.
   SwiftTerm:
     url: https://forgejo.kavas.dev/emircan/SwiftTerm-forgejo
-    exactVersion: v1.20.0-forgejo
+    exactVersion: 1.20.0-forgejo
 
 settings:
   base:
