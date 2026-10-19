@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 3
+## KRemote 1.8.0 beta 4
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -17,6 +17,23 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### Fixed: signing in to SFTP with a password
+
+beta 3 could not open SFTP on a server that authenticates with a password. With
+no terminal attached to an SFTP connection, `ssh` had nowhere to read the
+password from and fell back to `ssh-askpass`, which macOS does not ship — so the
+connection died with `ssh_askpass: exec(/usr/X11R6/bin/ssh-askpass): No such file
+or directory` before the protocol even started. The saved password was also never
+handed to the SFTP connection at all.
+
+Both are fixed: the browser now signs in with the password saved on the
+connection, using a private (0700, deleted when the session closes) askpass
+helper, and the password never appears in the process list. The same password is
+used by the `sudo` channel when elevation is needed.
+
+If password sign-in still fails, the window shows ssh's own reason — check that
+the host accepts password authentication and the saved password is current.
 
 ### New: an SFTP file browser
 
@@ -59,7 +76,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.3 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.4 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not
