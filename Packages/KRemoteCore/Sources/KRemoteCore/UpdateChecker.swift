@@ -166,6 +166,9 @@ public enum UpdateChecker {
         let zip = assets["zip"] as? String
         let dmg = assets["dmg"] as? String
         let page = (obj["page"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        // Whichever asset we hand back needs its filename too: the updater writes
+        // the download to that name before expanding it.
+        let chosen = zip ?? dmg
 
         return UpdateInfo(
             currentVersion: currentVersion,
@@ -174,8 +177,8 @@ public enum UpdateChecker {
             notes: (obj["notes"] as? String) ?? "",
             htmlURL: page ?? releasePage(version: version),
             publishedAt: (obj["publishedAt"] as? String) ?? "",
-            assetName: zip.map { ($0 as NSString).lastPathComponent },
-            assetURL: zip ?? dmg,
+            assetName: chosen.map { ($0 as NSString).lastPathComponent },
+            assetURL: chosen,
             prerelease: (obj["prerelease"] as? Bool) ?? version.contains("-")
         )
     }
