@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 7
+## KRemote 1.8.0 beta 8
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -17,6 +17,26 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### New: download, upload and file operations
+
+The SFTP window could only look at files. Now it can move them:
+
+- **Download** (⌘D) — one file opens a save panel; a folder or a multi-selection
+  asks for a destination folder and never overwrites silently (a clash becomes
+  `name 2.ext`).
+- **Upload** (⌘U) — pick files or folders and they go into the folder you are in.
+- **New Folder** (⇧⌘N), **Rename**, **Delete** and a **Permissions** sheet from the
+  row's context menu, plus **Show Info**.
+- A transfers panel under the listing shows progress, throughput, failures and
+  offers cancel/retry per item.
+
+### Fixed: the permission error vanished
+
+A refused folder put its message on screen for a moment and then wiped it: the
+browser returned you to the previous folder and that folder's successful reload
+cleared the message a runloop later. The reason now stays in a dismissible banner
+above the listing you are in.
 
 ### Fixed: folders would not open
 
@@ -106,7 +126,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.7 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.8 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not
