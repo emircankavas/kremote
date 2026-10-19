@@ -1,12 +1,16 @@
 name: Release
 
-# Tag-triggered: pushing a v* tag builds a Release .app, signs it ad-hoc and
-# attaches a .dmg to a GitHub Release.
+# Tag-triggered release into the PUBLIC companion repository.
 #
-# No Apple Developer account is required: the bundle is ad-hoc signed (enough for
-# arm64 to run) and NOT notarized. Users clear Gatekeeper's quarantine once with
-# `xattr -dr com.apple.quarantine /Applications/KRemote.app` (or right-click →
-# Open). Notarization is a later step that needs a paid developer account.
+# The source repository is private, so an installed app cannot read its release
+# API without a token. Everything the app reads lives in the public
+# `emircan/kremote-releases` repository:
+#
+#   v1.8.0-beta.1  -> pre-release, appcast-beta.json
+#   v1.8.0         -> stable release, appcast-stable.json (+ beta refreshed)
+#
+# No Apple Developer account: the bundle is ad-hoc signed (enough for arm64) and
+# not notarized. Users clear quarantine once (right-click -> Open).
 on:
   push:
     tags:
@@ -14,24 +18,23 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. v0.1.0)"
+        description: "Tag to release (e.g. v1.8.0-beta.1)"
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     name: Build & Release (macOS)
-    # Self-hosted: the Mac mini (no macOS-runner minutes on a private repo).
     runs-on: [self-hosted, macOS, ARM64]
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Resolve version
+      - name: Resolve version and channel
         id: version
         run: |
           set -o pipefail
@@ -40,8 +43,19 @@ jobs:
           else
             TAG="${GITHUB_REF_NAME}"
           fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          case "$TAG" in
+            v*) ;;
+            *) echo "::error::unexpected tag '$TAG' (expected v*)"; exit 1 ;;
+          esac
+          VERSION="${TAG#v}"
+          case "$VERSION" in
+            *-*) CHANNEL="beta" ;;
+            *)   CHANNEL="stable" ;;
+          esac
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG (channel=$CHANNEL)"
 
       - name: Install XcodeGen
         run: |
@@ -67,13 +81,9 @@ jobs:
       - name: Build FreeRDP (permissive, OpenH264, no ffmpeg)
         run: |
           set -o pipefail
-          # Homebrew provides the build deps (cmake/ninja/pkgconf + openssl,
-          # openh264, jansson, uriparser, jpeg-turbo), NOT freerdp itself: its
-          # bottle hard-depends on GPL-3.0 ffmpeg and pulls in X11/SDL/USB.
           export PATH="/opt/homebrew/bin:$PATH"
           brew list --versions cmake ninja pkgconf openh264 jansson uriparser jpeg-turbo openssl@4 >/dev/null 2>&1 || \
             brew install cmake ninja pkgconf openh264 jansson uriparser jpeg-turbo openssl@4
-          # Built from source so nothing GPL-3.0 is embedded. ~10 MB of libraries.
           bash scripts/build-freerdp.sh "$HOME/hermes-build/freerdp-install"
 
       - name: Generate Xcode project
@@ -81,6 +91,14 @@ jobs:
           set -o pipefail
           export PATH="$HOME/hermes-build/bin:$PATH"
           xcodegen generate
+
+      - name: Stamp the bundle version
+        run: |
+          set -o pipefail
+          # project.yml carries the development version; the tag is authoritative
+          # for a release, so the built bundle reports exactly what it is.
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ steps.version.outputs.version }}" Info.plist
+          echo "stamped Info.plist with ${{ steps.version.outputs.version }}"
 
       - name: Build (Release)
         run: |
@@ -102,12 +120,13 @@ jobs:
         run: |
           set -o pipefail
           APP="build/Build/Products/Release/KRemote.app"
-          if [ ! -d "$APP" ]; then
-            echo "::error::Release build produced no .app at $APP"
-            exit 1
-          fi
+          [ -d "$APP" ] || { echo "::error::no .app at $APP"; exit 1; }
           test -x "$APP/Contents/MacOS/KRemote" || { echo "::error::missing executable"; exit 1; }
-          echo "Bundle size:"; du -sh "$APP"
+          BUILT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+          [ "$BUILT" = "${{ steps.version.outputs.version }}" ] || {
+            echo "::error::bundle reports $BUILT, tag says ${{ steps.version.outputs.version }}"; exit 1; }
+          echo "Bundle version: $BUILT"
+          du -sh "$APP"
 
       - name: Embed the RDP libraries and sign
         env:
@@ -117,88 +136,47 @@ jobs:
           APP="build/Build/Products/Release/KRemote.app"
           KEYCHAIN="$HOME/hermes-build/signing/kremote-signing.keychain-db"
           IDENTITY="-"
-
-          # A stable identity matters, not just "signed": an ad-hoc signature's
-          # designated requirement is a cdhash that changes every build, which
-          # invalidates the keychain ACL of every stored password and makes macOS
-          # re-prompt after each update. Signing with a fixed certificate changes
-          # the requirement to `certificate leaf = H"..."`, which survives updates.
           if [ -n "${KC_PASSWORD:-}" ] && [ -f "$KEYCHAIN" ]; then
             security unlock-keychain -p "$KC_PASSWORD" "$KEYCHAIN"
             IDENTITY="KRemote Dev"
           else
             echo "::warning::Stable signing identity unavailable; falling back to ad-hoc."
-            echo "::warning::Keychain passwords will be re-prompted after this update."
           fi
-
-          # Copies the RDP libraries into Contents/Frameworks/, rewrites install
-          # names, re-signs, and fails if anything outside the bundle is still
-          # needed or if a GPL/X11 library slipped in.
           bash scripts/embed-freerdp.sh "$APP" "$IDENTITY"
-
           codesign --verify --verbose=2 "$APP" || true
-          echo "Designated requirement:"
-          codesign -d -r- "$APP" 2>&1 | sed -n '2,3p'
 
-      - name: Package .dmg
+      - name: Package .dmg and .zip
         run: |
           set -o pipefail
           APP="build/Build/Products/Release/KRemote.app"
-          NAME="KRemote-${{ steps.version.outputs.version }}.dmg"
-          STAGE="dmg-stage"
-          rm -rf "$STAGE"; mkdir "$STAGE"
-          cp -R "$APP" "$STAGE/"
-          ln -s /Applications "$STAGE/Applications"
-          hdiutil create -volname "KRemote" -srcfolder "$STAGE" -ov -format UDZO "$NAME"
-          echo "dmg=$NAME" >> "$GITHUB_OUTPUT"
-        id: dmg
+          VERSION="${{ steps.version.outputs.version }}"
+          rm -rf dmg-stage && mkdir dmg-stage
+          cp -R "$APP" dmg-stage/
+          ln -s /Applications dmg-stage/Applications
+          hdiutil create -volname "KRemote" -srcfolder dmg-stage -ov -format UDZO "KRemote-$VERSION.dmg"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "KRemote-$VERSION.zip"
+          ls -lh "KRemote-$VERSION.dmg" "KRemote-$VERSION.zip"
 
-      - name: Package .zip (fallback)
+      - name: Publish to the public releases repository
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
         run: |
           set -o pipefail
-          ditto -c -k --sequesterRsrc --keepParent \
-            build/Build/Products/Release/KRemote.app \
-            "KRemote-${{ steps.version.outputs.version }}.zip"
+          VERSION="${{ steps.version.outputs.version }}"
+          python3 scripts/publish-release.py \
+            --tag "${{ steps.version.outputs.tag }}" \
+            --version "$VERSION" \
+            --channel "${{ steps.version.outputs.channel }}" \
+            --notes RELEASE_NOTES.md \
+            --dmg "KRemote-$VERSION.dmg" \
+            --zip "KRemote-$VERSION.zip"
 
-      - name: Write release notes
+      - name: Verify the appcast the app will read
         run: |
-          # The curated body lives in the repo; add the per-tag install footer to
-          # it so both are on the release page.
-          cat RELEASE_NOTES.md > /tmp/notes.md
-          cat >> /tmp/notes.md <<'EOF'
-
-          ### Install
-          1. Download `KRemote-${{ steps.version.outputs.version }}.dmg` and open it.
-          2. Drag **KRemote** to Applications.
-          3. The app is **not notarized** (no Apple Developer account yet), so macOS
-             quarantines it. Clear that once with either:
-             - Terminal: `xattr -dr com.apple.quarantine /Applications/KRemote.app`
-             - or right-click the app → **Open** → **Open** again.
-
-          Then open it normally.
-          EOF
-          mv /tmp/notes.md RELEASE_NOTES.md
-
-      - name: Publish release
-        # softprops/action-gh-release is not published on data.forgejo.org, and
-        # the gh CLI does not speak Forgejo's API. Use the release API directly.
-        env:
-          TOKEN: ${{ secrets.FORGEJO_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG='${{ steps.version.outputs.tag }}'
-          VERSION='${{ steps.version.outputs.version }}'
-          API=https://forgejo.kavas.dev/api/v1/repos/emircan/kremote
-
-          python3 -c 'import json,sys; print(json.dumps({"tag_name":sys.argv[1],"name":"KRemote "+sys.argv[1],"body":open("RELEASE_NOTES.md").read()}))' "$TAG" > release.json
-          ID=$(curl -sS -X POST -H "Authorization: token $TOKEN" \
-            -H 'Content-Type: application/json' --data @release.json "$API/releases" \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-          echo "release id=$ID"
-
-          for f in "KRemote-$VERSION.dmg" "KRemote-$VERSION.zip"; do
-            [ -f "$f" ] || { echo "missing asset $f"; exit 1; }
-            curl -sS -X POST -H "Authorization: token $TOKEN" \
-              -F "attachment=@$f" "$API/releases/$ID/assets?name=$f" >/dev/null
-            echo "uploaded $f"
-          done
+          set -o pipefail
+          CHANNEL="${{ steps.version.outputs.channel }}"
+          URL="https://forgejo.kavas.dev/emircan/kremote-releases/raw/branch/main/appcast-$CHANNEL.json?t=$(date +%s)"
+          echo "fetching $URL"
+          curl -fsSL "$URL" -o appcast-check.json
+          cat appcast-check.json
+          python3 scripts/check-appcast.py appcast-check.json "${{ steps.version.outputs.version }}"

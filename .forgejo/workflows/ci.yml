@@ -2,9 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `beta` is the integration branch: new work lands there and must stay
+    # green, so the shipped `main` build is never the first thing to see a
+    # regression.
+    branches: [main, beta]
   pull_request:
-    branches: [main]
+    branches: [main, beta]
   workflow_dispatch:
 
 concurrency:
