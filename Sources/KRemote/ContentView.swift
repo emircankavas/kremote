@@ -92,8 +92,19 @@ extension UUID: @retroactive Identifiable {
 /// The `#` (become root) and split-view controls, shown in the window title bar.
 struct SessionToolbarItems: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        Button {
+            guard let nodeID = model.focusedSession?.nodeID ?? model.selectedNodeID else { return }
+            model.openSFTP(for: nodeID)
+            openWindow(id: "sftp", value: nodeID)
+        } label: {
+            Image(systemName: "folder.badge.gearshape")
+        }
+        .help("Browse this server's files over SFTP (⇧⌘S)")
+        .disabled((model.focusedSession?.nodeID ?? model.selectedNodeID) == nil)
+
         Button {
             model.requestRoot()
         } label: {

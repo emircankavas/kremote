@@ -545,6 +545,62 @@ final class AppModel {
         return sessions.first { $0.id == activeSessionID }
     }
 
+    // MARK: - SFTP
+
+    /// Open SFTP windows, one per connection. Kept on the model so that asking
+    /// for the same connection twice focuses the existing window instead of
+    /// opening a second browser on the same server.
+    private(set) var sftpSessions: [SFTPSession] = []
+    /// Set to make the window for this connection key and front.
+    var focusedSFTPNodeID: ConnectionNode.ID?
+    /// Bumped when a new SFTP window must be opened; the scene watches it.
+    private(set) var sftpRequest = 0
+
+    /// Opens (or focuses) the file browser for a connection.
+    ///
+    /// Works with no terminal open — the browser makes its own `ssh` connection,
+    /// so it does not depend on a session having been started.
+    func openSFTP(for nodeID: ConnectionNode.ID) {
+        guard let node = find(nodeID), !node.isFolder else { return }
+        if sftpSessions.contains(where: { $0.nodeID == nodeID }) {
+            focusedSFTPNodeID = nodeID
+            sftpRequest += 1
+            return
+        }
+        hydrateCredentials(for: nodeID)
+        guard let effective = effective(nodeID), !effective.host.isEmpty else {
+            lastError = "This connection has no host set."
+            return
+        }
+        let transport = ProcessSFTPTransport(
+            host: effective.host,
+            port: effective.port,
+            username: effective.username,
+            identityFile: effective.identityFile
+        )
+        let client = SFTPClient(transport: transport)
+        let user = effective.username.isEmpty ? "" : "\(effective.username)@"
+        let session = SFTPSession(
+            nodeID: nodeID,
+            title: node.name,
+            client: client,
+            target: "sftp://\(user)\(effective.host):\(effective.port)"
+        )
+        sftpSessions.append(session)
+        focusedSFTPNodeID = nodeID
+        sftpRequest += 1
+    }
+
+    /// Called by the window when it closes.
+    func closeSFTP(_ id: SFTPSession.ID) {
+        sftpSessions.removeAll { $0.id == id }
+    }
+
+    /// The session open for a node, if any.
+    func sftpSession(for nodeID: ConnectionNode.ID) -> SFTPSession? {
+        sftpSessions.first { $0.nodeID == nodeID }
+    }
+
     // MARK: - Elevation
 
     /// Incremented each time the user asks to become root; the targeted terminal

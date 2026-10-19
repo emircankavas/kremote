@@ -3,6 +3,7 @@ import KRemoteCore
 
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
 
     @State private var renameTarget: ConnectionNode.ID?
     @State private var renameDraft: String = ""
@@ -147,6 +148,15 @@ struct SidebarView: View {
             Button("New Folder") { model.addFolder(inFolder: node.id) }
             Divider()
         } else {
+            // Connect ▸ submenu: the keyboard-free way to reach a session, and
+            // the only way to open SFTP without a terminal already running.
+            Menu("Connect") {
+                Button("Open Terminal") { model.open(node) }
+                Button("Terminal in New Tab") { model.open(node, newTab: true) }
+                Divider()
+                Button("SFTP") { openSFTP(node) }
+                    .disabled(!node.supportsSSH)
+            }
             Button("Open") { model.open(node) }
             Button("Open in New Tab") { model.open(node, newTab: true) }
             Divider()
@@ -154,6 +164,11 @@ struct SidebarView: View {
         Button("Edit…") { model.editingNodeID = node.id }
         Button("Rename…") { beginRename(node) }
         Button("Delete", role: .destructive) { deleteTarget = node.id }
+    }
+
+    private func openSFTP(_ node: ConnectionNode) {
+        model.openSFTP(for: node.id)
+        openWindow(id: "sftp", value: node.id)
     }
 }
 

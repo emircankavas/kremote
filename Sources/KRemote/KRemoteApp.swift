@@ -28,6 +28,22 @@ struct KRemoteApp: App {
                     Task { await silentCheck() }
                 }
         }
+        // SFTP opens its own window per connection, the way Finder windows work —
+        // one browser per server, and asking again raises the existing one.
+        WindowGroup("SFTP", id: "sftp", for: UUID.self) { $nodeID in
+            SFTPWindowHost(nodeID: nodeID)
+                .environment(model)
+        }
+        .windowResizability(.contentMinSize)
+        .commands {
+            CommandGroup(after: .newItem) {
+                Button("SFTP…") {
+                    if let id = model.selectedNodeID { model.openSFTP(for: id) }
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(model.selectedNodeID == nil)
+            }
+        }
         // System title bar back on (the app-drawn header did not work out), so
         // the tabs go back into the toolbar, centred.
         .windowToolbarStyle(.unified(showsTitle: true))
