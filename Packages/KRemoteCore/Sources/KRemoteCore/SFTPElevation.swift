@@ -592,4 +592,17 @@ public final class SudoElevationProvider: ElevationProvider, @unchecked Sendable
         let line = Data((stored + "\n").utf8)
         return factory(ElevationCommand.remoteCommand, line)
     }
+
+    /// Answered without exposing the secret: the flag and whether a usable
+    /// password is stored.
+    public var elevationAvailability: ElevationAvailability {
+        guard target.usesSudo else { return .disabled }
+        guard let stored = (try? secretStore.secret(for: target.nodeID)) ?? nil,
+              Self.isUsable(password: stored) else {
+            return .noPassword
+        }
+        return .available
+    }
 }
+
+extension SudoElevationProvider: ElevationCapabilityReporting {}

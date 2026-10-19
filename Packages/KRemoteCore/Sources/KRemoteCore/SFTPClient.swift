@@ -33,6 +33,18 @@ public protocol ElevationProvider: AnyObject, Sendable {
     func elevatedTransport(for path: String) async -> SFTPTransport?
 }
 
+/// Why elevation is or is not on offer for a connection.
+public enum ElevationAvailability: Sendable, Equatable {
+    /// The node's sudo flag is off.
+    case disabled
+    /// Sudo is on but no usable password is stored, so it cannot be attempted.
+    case noPassword
+    /// A refused operation would be retried once over the elevated channel.
+    case available
+
+    public var isAvailable: Bool { self == .available }
+}
+
 /// Optional refinement: a provider that can say up front whether it *would*
 /// elevate. The window uses this to word a permission failure honestly ("enable
 /// sudo on this connection" versus "sudo was tried and refused") instead of
@@ -41,8 +53,7 @@ public protocol ElevationProvider: AnyObject, Sendable {
 /// Not a requirement of `ElevationProvider`, so a provider that only implements
 /// the one method keeps working.
 public protocol ElevationCapabilityReporting: AnyObject, Sendable {
-    /// True when a refused operation would be retried over an elevated channel.
-    var isElevationAvailable: Bool { get }
+    var elevationAvailability: ElevationAvailability { get }
 }
 
 /// Speaks SFTP v3 over an injectable transport.
@@ -79,6 +90,17 @@ public final class SFTPClient: @unchecked Sendable {
 
     public var version: UInt32 { lock.withLock { serverVersion } }
 
+    /// True when a refused operation on this client would be retried over an
+    /// elevated channel. The window uses it to word the permission alert: "sudo
+    /// was tried" and "sudo is not set up for this connection" are different
+    /// problems with different fixes.
+    public var elevationAvailability: ElevationAvailability {
+        guard let elevation else { return .disabled }
+        return (elevation as? ElevationCapabilityReporting)?.elevationAvailability ?? .available
+    }
+
+    public var isElevationAvailable: Bool { elevationAvailability.isAvailable }
+
     /// The arguments of the running transport, for diagnostics.
     public var transportDescription: String {
         (transport as? ProcessSFTPTransport)?.commandLine.joined(separator: " ") ?? "custom transport"
@@ -109,13 +131,46 @@ public final class SFTPClient: @unchecked Sendable {
 
     // MARK: - Requests
 
-    /// Sends one request and returns its reply payload.
-    /// Sends one request and returns its reply. Internal so the transfer
-    /// engine shares one request/id state machine with the client.
+    /// Serialises whole requests. `request` matches replies by id and discards
+    /// strays, so two overlapping callers would trade replies; the transfer queue
+    /// runs up to three transfers at once over this one client, so the gate is
+    /// what keeps that safe rather than the callers' discipline.
+    private var isRequesting = false
+    private var requestWaiters: [CheckedContinuation<Void, Never>] = []
+
+    private func acquireRequestSlot() async {
+        let immediate = lock.withLock { () -> Bool in
+            if isRequesting { return false }
+            isRequesting = true
+            return true
+        }
+        if immediate { return }
+        await withCheckedContinuation { continuation in
+            lock.withLock { requestWaiters.append(continuation) }
+        }
+    }
+
+    private func releaseRequestSlot() {
+        let next: CheckedContinuation<Void, Never>? = lock.withLock {
+            if requestWaiters.isEmpty {
+                isRequesting = false
+                return nil
+            }
+            return requestWaiters.removeFirst()
+        }
+        next?.resume()
+    }
+
+    /// Sends one request and returns its reply.
+    /// Internal so the transfer engine shares one request/id state machine with
+    /// the client.
     func request(type: SFTPPacketType, payload: [UInt8]) async throws -> SFTPFraming.Packet {
         guard lock.withLock({ isOpen }) else {
             throw SFTPError.connectionClosed("not connected")
         }
+        await acquireRequestSlot()
+        defer { releaseRequestSlot() }
+
         let id = lock.withLock { () -> UInt32 in
             let current = nextRequestID
             nextRequestID = nextRequestID &+ 1

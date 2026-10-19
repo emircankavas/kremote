@@ -41,6 +41,20 @@ final class SFTPSession: Identifiable {
     /// Set when an operation failed; always carries the server's own text.
     var errorMessage: String?
 
+    /// The window's transfer queue. Owned here so a window close can cancel
+    /// everything still in flight instead of leaving an ssh process writing.
+    let transfers = TransferQueue()
+
+    /// Set while a file operation (rename, delete, chmod, new folder) is running,
+    /// so the toolbar can disable the actions that would collide with it.
+    private(set) var isBusy = false
+
+    /// Everything the browser knows about the connection for wording a failure:
+    /// whether sudo is set up is the client's business, not the view's.
+    var elevationContext: OperationFailureText.Context {
+        OperationFailureText.Context(elevation: client.elevationAvailability)
+    }
+
     /// Sidebar folders: Home/Root/tmp plus whatever mount roots the server has.
     private(set) var shortcuts: [Shortcut] = [
         Shortcut(name: "Home", path: "~", icon: "house"),
@@ -171,6 +185,16 @@ final class SFTPSession: Identifiable {
 
     /// Double-click / Return on a row. A file is a no-op in this card; card 5
     /// wires open and download.
+    /// The row the user last picked, so Return can act on it.
+    var selectedPath: String?
+
+    /// Opens the selected folder (Return / ⌘↓), the Finder behaviour.
+    func openSelection() async {
+        guard let selectedPath,
+              let entry = entries.first(where: { $0.path == selectedPath }) else { return }
+        await open(entry)
+    }
+
     func open(_ entry: RemoteEntry) async {
         guard entry.isDirectory else { return }
         await go(to: entry.path)
@@ -187,8 +211,16 @@ final class SFTPSession: Identifiable {
         } else {
             target = SFTPClient.join(path, trimmed)
         }
+        let previous = path
         visit(target)
         await load()
+        // A directory that could not be read must not leave the browser sitting
+        // in it with an empty list: that reads as "the app broke". Go back to the
+        // folder that worked and keep the server's message on screen.
+        if errorMessage != nil, entries.isEmpty, path != previous {
+            visit(previous)
+            await load()
+        }
     }
 
     func goUp() async {
@@ -265,6 +297,265 @@ final class SFTPSession: Identifiable {
         }
         guard !mounts.isEmpty else { return }
         shortcuts = Array(shortcuts.prefix(3)) + mounts
+    }
+
+    // MARK: - File operations
+
+    /// Creates a folder in the current directory and returns its path so the view
+    /// can select it.
+    @discardableResult
+    func createFolder(named name: String) async -> Result<String, OperationError> {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isValidName(trimmed) else { return .failure(OperationError(name: trimmed, error: InvalidName())) }
+        let destination = SFTPClient.join(path, trimmed)
+        do {
+            try await client.mkdir(destination)
+            await load()
+            return .success(destination)
+        } catch {
+            return .failure(OperationError(name: trimmed, error: error))
+        }
+    }
+
+    /// Renames one entry in place. `newName` is a name, not a path.
+    func rename(_ entry: RemoteEntry, to newName: String) async -> Result<String, OperationError> {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isValidName(trimmed) else { return .failure(OperationError(name: entry.name, error: InvalidName())) }
+        guard trimmed != entry.name else { return .success(entry.path) }
+        let destination = SFTPClient.join(SFTPClient.parent(of: entry.path), trimmed)
+        do {
+            try await client.rename(entry.path, to: destination)
+            await load()
+            return .success(destination)
+        } catch {
+            return .failure(OperationError(name: entry.name, error: error))
+        }
+    }
+
+    /// Deletes a whole selection in one pass, reporting which items worked.
+    ///
+    /// One summary, not one alert per item — that is the batch rule the card sets
+    /// out. A failure on one item does not stop the others.
+    func delete(_ entries: [RemoteEntry]) async -> BatchOutcome {
+        var outcome = BatchOutcome()
+        isBusy = true
+        defer { isBusy = false }
+        for entry in entries {
+            if Task.isCancelled {
+                outcome.wasCancelled = true
+                outcome.skipped.append(entry.name)
+                continue
+            }
+            do {
+                _ = try await client.removeRecursively(entry.path)
+                outcome.recordSuccess(entry.name)
+            } catch {
+                outcome.recordFailure(entry.name, error: error)
+            }
+        }
+        await load()
+        return outcome
+    }
+
+    /// How many items a delete of `entry` would remove: 1 for a file, the tree's
+    /// size for a folder. Shows a spinner-worthy wait only on big trees, so the
+    /// confirmation names a real number instead of "all contents".
+    func deleteCount(for entry: RemoteEntry) async -> Int? {
+        guard entry.isDirectory, !entry.isSymlink else { return 1 }
+        return try? await client.countItems(in: entry.path)
+    }
+
+    /// Applies a permissions sheet. One entry at a time so a refusal is reported
+    /// per item, and the row is refreshed on success.
+    func applyPermissions(
+        _ set: PermissionSet,
+        owner: UInt32?,
+        group: UInt32?,
+        to entries: [RemoteEntry]
+    ) async -> BatchOutcome {
+        var outcome = BatchOutcome()
+        isBusy = true
+        defer { isBusy = false }
+        for entry in entries {
+            do {
+                try await client.setAttributes(
+                    entry.path,
+                    permissions: set.modeBits,
+                    uid: owner,
+                    gid: group
+                )
+                outcome.recordSuccess(entry.name)
+            } catch {
+                outcome.recordFailure(entry.name, error: error)
+            }
+        }
+        await load()
+        return outcome
+    }
+
+    /// `stat` with the link itself, for the Show Info sheet.
+    func info(for entry: RemoteEntry) async -> SFTPAttributes? {
+        try? await client.stat(entry.path, followSymlinks: false)
+    }
+
+    /// The human-readable size of a selection, for the status bar: files are
+    /// summed, folders are counted separately because their true size is a tree
+    /// walk the status bar must not perform on every selection change.
+    func selectionSummary(_ selection: Set<String>, rows: [RemoteEntry]) -> (count: Int, bytes: UInt64, folders: Int) {
+        let selected = rows.filter { selection.contains($0.path) }
+        let files = selected.filter { !$0.isDirectory }
+        return (
+            selected.count,
+            files.reduce(UInt64(0)) { $0 + ($1.size ?? 0) },
+            selected.count - files.count
+        )
+    }
+
+    /// A name is usable when it is not empty, not a path, and not `.` or `..`.
+    func isValidName(_ name: String) -> Bool {
+        guard !name.isEmpty, !name.contains("/"), !name.contains("\0") else { return false }
+        return name != "." && name != ".."
+    }
+
+    // MARK: - Transfers
+
+    /// Queues downloads with already-resolved destinations.
+    ///
+    /// The window resolves conflicts (Replace / Keep Both / Skip) *before* this
+    /// call, so the queue never has to ask a question mid-batch.
+    func enqueueDownload(_ items: [(entry: RemoteEntry, destination: URL)]) {
+        guard !items.isEmpty else { return }
+        for item in items {
+            transfers.enqueueDownload(
+                name: item.destination.lastPathComponent,
+                remotePath: item.entry.path,
+                localURL: item.destination
+            )
+        }
+        transfers.isExpanded = true
+        startTransfers()
+    }
+
+    /// Uploads local URLs (files or folders) into a remote directory.
+    func enqueueUpload(_ urls: [URL], into directory: String? = nil) {
+        let destinationDirectory = directory ?? path
+        var queued = false
+        for url in urls {
+            let destination = SFTPClient.join(destinationDirectory, url.lastPathComponent)
+            transfers.enqueueUpload(
+                name: url.lastPathComponent,
+                remotePath: destination,
+                localURL: url
+            )
+            queued = true
+        }
+        guard queued else { return }
+        transfers.isExpanded = true
+        startTransfers()
+    }
+
+    /// Runs queued transfers up to the queue's concurrency limit.
+    ///
+    /// Each item gets its own `Task`, so a slow 200 MB upload does not hold the
+    /// others back and a failure cannot cancel its neighbours. The loop starts
+    /// every item the queue allows and returns; finished tasks start the next.
+    func startTransfers() {
+        while let item = transfers.nextRunnable() {
+            transfers.markRunning(item.id)
+            let id = item.id
+            let kind = item.kind
+            let remotePath = item.remotePath
+            let localURL = item.localURL
+            let queue = transfers
+            let client = self.client
+
+            Task { [weak self] in
+                do {
+                    switch kind {
+                    case .download:
+                        guard let localURL else { throw SFTPError.invalidArgument("no local destination") }
+                        try await Self.runDownload(
+                            client: client, remotePath: remotePath, localURL: localURL, id: id, queue: queue
+                        )
+                    case .upload:
+                        guard let localURL else { throw SFTPError.invalidArgument("no local source") }
+                        try await Self.runUpload(
+                            client: client, localURL: localURL, remotePath: remotePath, id: id, queue: queue
+                        )
+                    case .internalCopy:
+                        guard let localURL else { throw SFTPError.invalidArgument("no local destination") }
+                        try await Self.runDownload(
+                            client: client, remotePath: remotePath, localURL: localURL, id: id, queue: queue
+                        )
+                    }
+                    queue.markFinished(id)
+                } catch is TransferCancelled {
+                    queue.markCancelled(id)
+                } catch {
+                    queue.markFailed(id, reason: OperationFailureText.describe(error))
+                }
+                await self?.refreshAfterTransfer()
+            }
+        }
+    }
+
+    /// Downloads, treating a remote directory as a tree.
+    private static func runDownload(
+        client: SFTPClient, remotePath: String, localURL: URL, id: UUID, queue: TransferQueue
+    ) async throws {
+        let attributes = try await client.stat(remotePath, followSymlinks: false)
+        if attributes.isDirectory {
+            try await client.downloadTree(remotePath, to: localURL, progress: { tick in
+                Task { @MainActor in queue.updateProgress(id, progress: tick) }
+            }, isCancelled: {
+                queue.isCancelled(id)
+            })
+        } else {
+            try await client.downloadFile(remotePath, to: localURL, progress: { tick in
+                Task { @MainActor in queue.updateProgress(id, progress: tick) }
+            }, isCancelled: {
+                queue.isCancelled(id)
+            })
+        }
+    }
+
+    /// Uploads, treating a local directory as a tree.
+    private static func runUpload(
+        client: SFTPClient, localURL: URL, remotePath: String, id: UUID, queue: TransferQueue
+    ) async throws {
+        var isDirectory: ObjCBool = false
+        FileManager.default.fileExists(atPath: localURL.path, isDirectory: &isDirectory)
+        if isDirectory.boolValue {
+            try await client.uploadTree(from: localURL, to: remotePath, progress: { tick in
+                Task { @MainActor in queue.updateProgress(id, progress: tick) }
+            }, isCancelled: {
+                queue.isCancelled(id)
+            })
+        } else {
+            try await client.uploadFile(localURL, to: remotePath, progress: { tick in
+                Task { @MainActor in queue.updateProgress(id, progress: tick) }
+            }, isCancelled: {
+                queue.isCancelled(id)
+            })
+        }
+    }
+
+    /// A finished transfer changed the directory: refresh it so the new file is
+    /// visible without the user pressing ⌘R.
+    private func refreshAfterTransfer() async {
+        if transfers.runningCount > 0 || transfers.queuedCount > 0 {
+            startTransfers()
+            return
+        }
+        await load()
+    }
+
+    /// Cancels every transfer, for a window that is closing: an ssh process left
+    /// writing is worse than a cancelled download.
+    func cancelTransfers() {
+        for item in transfers.items where item.isQueued || item.isRunning {
+            transfers.cancel(item.id)
+        }
     }
 
     // MARK: - Rows the views draw

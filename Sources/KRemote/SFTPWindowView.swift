@@ -81,6 +81,18 @@ struct SFTPWindowView: View {
         .frame(minWidth: 780, minHeight: 440)
         .navigationTitle(session.title)
         .task { await session.connect() }
+        .background(
+            // Return and Enter open the selected folder. A hidden button is the
+            // only way to bind a bare key to an action in SwiftUI.
+            Group {
+                Button("") { openSelection() }
+                    .keyboardShortcut(.return, modifiers: [])
+                Button("") { openSelection() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .opacity(0)
+            .frame(width: 0, height: 0)
+        )
         .onChange(of: session.path) { _, _ in selection = nil }
         .sheet(isPresented: $isGoToPresented) { goToSheet }
     }
@@ -352,8 +364,13 @@ struct SFTPWindowView: View {
             selection == entry.path ? Color.accentColor.opacity(0.20) : Color.clear
         )
         .contentShape(Rectangle())
-        .onTapGesture { selection = entry.path }
-        .onTapGesture(count: 2) { open(entry) }
+        // One gesture recogniser, not two. A separate `onTapGesture` for the
+        // single click swallows the double click on macOS, so a row could be
+        // selected but never opened.
+        .gesture(
+            TapGesture(count: 2).onEnded { open(entry) }
+                .exclusively(before: TapGesture().onEnded { select(entry) })
+        )
         .contextMenu { rowMenu(entry) }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityText(entry))
@@ -387,8 +404,10 @@ struct SFTPWindowView: View {
                                   : Color.clear)
                     )
                     .contentShape(Rectangle())
-                    .onTapGesture { selection = entry.path }
-                    .onTapGesture(count: 2) { open(entry) }
+                    .gesture(
+                        TapGesture(count: 2).onEnded { open(entry) }
+                            .exclusively(before: TapGesture().onEnded { select(entry) })
+                    )
                     .contextMenu { rowMenu(entry) }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel(accessibilityText(entry))
@@ -476,7 +495,19 @@ struct SFTPWindowView: View {
 
     // MARK: - Actions
 
+    /// Picking a row: selection is shared with the session so Return knows what
+    /// is highlighted.
+    private func select(_ entry: RemoteEntry) {
+        selection = entry.path
+        session.selectedPath = entry.path
+    }
+
+    private func openSelection() {
+        Task { await session.openSelection() }
+    }
+
     private func open(_ entry: RemoteEntry) {
+        session.selectedPath = entry.path
         // A folder navigates; a file is card 5's job (open/download).
         guard entry.isDirectory else { return }
         Task { await session.open(entry) }
