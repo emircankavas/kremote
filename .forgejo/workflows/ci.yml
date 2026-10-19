@@ -37,7 +37,7 @@ jobs:
           export PATH="$HOME/hermes-build/bin:$PATH"
           xcodegen --version || {
             mkdir -p "$HOME/hermes-build/bin"
-            curl -fsSL -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip
+            curl -fsSL -o /tmp/xcodegen.zip https://forgejo.kavas.dev/emircan/xcodegen/releases/download/v2.44.1/xcodegen.zip
             rm -rf /tmp/xcodegen_dl && mkdir -p /tmp/xcodegen_dl && (cd /tmp/xcodegen_dl && unzip -q /tmp/xcodegen.zip)
             find /tmp/xcodegen_dl -maxdepth 4 -name xcodegen -type f -exec cp {} "$HOME/hermes-build/bin/xcodegen" \;
             chmod +x "$HOME/hermes-build/bin/xcodegen"
