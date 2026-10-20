@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 16
+## KRemote 1.8.0 beta 17
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -48,6 +48,17 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### Fixed: the sudo retry for Compress and Download never ran
+
+beta 16 was supposed to retry the archive as root when the server refused, but
+`tar` reports a refusal on stderr and exits — the channel sees a closed stream,
+not an error — so the retry was never reached and the download simply failed.
+
+The refusal is now recognised in the command's output, the half-written file is
+truncated before the elevated attempt, and if the elevated attempt is refused too
+the message says the sudo retry did not help (rather than repeating tar's text,
+which reads as "the feature is broken").
 
 ### Fixed: Compress and Download on files you can only read as root
 
@@ -239,7 +250,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.16 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.17 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not
