@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 13
+## KRemote 1.8.0 beta 14
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -48,6 +48,14 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### Fixed: selecting more than one file
+
+⌘-click and ⇧-click did nothing: the rows read the modifier keys inside a SwiftUI
+tap handler, where they have usually already been released, so every click looked
+like a plain click and replaced the selection. The click is now taken from the
+real mouse event, so ⌘-click toggles, ⇧-click extends, and a plain click replaces
+— in both list and icon view. The dialogs act on the whole selection.
 
 ### New: drag out, Get Info, and ⌘⌫
 
@@ -211,7 +219,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.13 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.14 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not
