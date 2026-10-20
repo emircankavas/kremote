@@ -47,16 +47,32 @@ struct MetricsBadge: View {
                 .popover(isPresented: $showDetail, arrowEdge: .bottom) {
                     detailPopover(metrics)
                 }
-            } else if let failure, case .shell = source {
-                // Only an SSH host reports its own failure: the session works, the
-                // figures do not, and the reason is one hover away.
-                Image(systemName: "chart.bar.xaxis")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .help(failure)
+            } else if case .shell = source {
+                // A placeholder while the first sample is in flight, and the reason
+                // if it never arrives. An invisible icon was the old behaviour and it
+                // read as "the feature is missing" rather than "the sample failed" —
+                // so this is a button that always occupies space and can be clicked
+                // for the reason.
+                Button {
+                    showDetail.toggle()
+                } label: {
+                    HStack(spacing: 8) {
+                        metric("cpu", value: "–")
+                        metric("memorychip", value: "–")
+                    }
+                }
+                .buttonStyle(.plain)
+                .help(failure ?? "Reading the server's load…")
+                .popover(isPresented: $showDetail, arrowEdge: .bottom) {
+                    failurePopover
+                }
             }
             // A WinRM failure draws nothing: "WinRM is off" is not a KRemote problem.
         }
+        // Without this the badge is the first thing a narrow pane squeezes, and the
+        // numbers truncate to "9…" — present in the layout, unreadable to a person.
+        .fixedSize()
+        .layoutPriority(2)
         .onAppear { sync() }
         .onDisappear { stop() }
         .onChange(of: isActive) { _, _ in sync() }
@@ -92,6 +108,22 @@ struct MetricsBadge: View {
             if let load = metrics.loadDetail { row("Load", load) }
             if let swap = metrics.swapDetail { row("Swap", swap) }
             if let uptime = metrics.uptimeDetail { row("Uptime", uptime) }
+            Text(hostLabel)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(12)
+    }
+
+    private var failurePopover: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Server load unavailable")
+                .font(.caption.weight(.semibold))
+            Text(failure ?? "Waiting for the first reading…")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 260, alignment: .leading)
             Text(hostLabel)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -139,7 +171,14 @@ struct MetricsBadge: View {
                 identityFile: identityFile, password: password,
                 controlPath: controlPath
             )
-            let sampler = MetricsSampler(shell: shell)
+            // No control path: a plain connection, used if the shared one cannot be
+            // established. Costs one authentication per sample, and is the only way
+            // the figures appear at all on a server that refuses the master.
+            let plain = RemoteShell(
+                host: host, port: port, username: username,
+                identityFile: identityFile, password: password
+            )
+            let sampler = MetricsSampler(shell: shell, fallback: plain)
             self.sampler = sampler
             Task {
                 await sampler.start { state in
@@ -191,6 +230,7 @@ struct MetricsBadge: View {
         case .failed(let reason):
             failure = reason
             metrics = nil
+            MetricsLog.record("SSH sample failed for \(hostLabel): \(reason)")
         case .idle, .sampling:
             break
         }

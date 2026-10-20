@@ -23,15 +23,30 @@ public actor MetricsSampler {
     public let interval: TimeInterval
 
     private let shell: RemoteShell
+    /// Used when `shell` cannot reach the server.
+    ///
+    /// A control master is the right default — it authenticates once instead of
+    /// every five seconds — but a password-only server is exactly where a background
+    /// master is most likely to fail: the askpass helper lives in this process, and a
+    /// master that outlives it has nobody to answer. Falling back to a plain
+    /// connection makes the metrics work at the cost of authenticating per sample.
+    private let fallbackShell: RemoteShell?
+    private var usingFallback = false
     private var running = false
     private var consecutiveFailures = 0
     private var onChange: (@Sendable (State) -> Void)?
 
     public private(set) var state: State = .idle
 
-    public init(shell: RemoteShell, interval: TimeInterval = 5) {
+    public init(shell: RemoteShell, fallback: RemoteShell? = nil, interval: TimeInterval = 5) {
         self.shell = shell
+        self.fallbackShell = fallback
         self.interval = interval
+    }
+
+    /// The connection in use right now.
+    private var activeShell: RemoteShell {
+        usingFallback ? (fallbackShell ?? shell) : shell
     }
 
     /// Starts polling. Idempotent: a second call does not open a second loop.
@@ -49,16 +64,30 @@ public actor MetricsSampler {
         running = false
         publish(.idle)
         shell.closeControlMaster()
+        fallbackShell?.closeControlMaster()
     }
 
     /// One sample now: the loop's body, reachable for a manual refresh.
     @discardableResult
     public func sampleOnce() async -> State {
         do {
-            let metrics = try await SystemMetricsProbe.sample(using: shell)
+            let metrics = try await SystemMetricsProbe.sample(using: activeShell)
             consecutiveFailures = 0
             publish(.ready(metrics))
         } catch {
+            // One attempt on the plain connection before giving up: this is the
+            // only path that still works when the control master could not start.
+            if !usingFallback, let fallbackShell {
+                usingFallback = true
+                do {
+                    let metrics = try await SystemMetricsProbe.sample(using: fallbackShell)
+                    consecutiveFailures = 0
+                    publish(.ready(metrics))
+                    return state
+                } catch {
+                    // Fall through to the failure path with the second reason.
+                }
+            }
             consecutiveFailures += 1
             // One dropped sample is noise: a loaded server hiccups, and the probe's
             // own `sleep 0.35` can be delayed. Replacing live numbers with an error
