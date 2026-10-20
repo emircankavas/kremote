@@ -562,10 +562,11 @@ struct SFTPWindowView: View {
         // One gesture recogniser, not two. A separate `onTapGesture` for the
         // single click swallows the double click on macOS, so a row could be
         // selected but never opened.
-        .gesture(
-            TapGesture(count: 2).onEnded { open(entry) }
-                .exclusively(before: TapGesture().onEnded { select(entry) })
-        )
+        // `onClick` reports the real event, so ⌘/⇧ are exact. A TapGesture
+        // cannot carry modifiers, which is why multi-selection never worked.
+        .onClick { clicks, flags in
+            if clicks >= 2 { open(entry) } else { select(entry, flags: flags) }
+        }
         .contextMenu { rowMenu(entry) }
         // Drag-out hands Finder a file promise, not a path string: a promise can
         // become a real file on drop, which a string cannot. The preview is the
@@ -605,10 +606,9 @@ struct SFTPWindowView: View {
                                   : Color.clear)
                     )
                     .contentShape(Rectangle())
-                    .gesture(
-                        TapGesture(count: 2).onEnded { open(entry) }
-                            .exclusively(before: TapGesture().onEnded { select(entry) })
-                    )
+                    .onClick { clicks, flags in
+                        if clicks >= 2 { open(entry) } else { select(entry, flags: flags) }
+                    }
                     .contextMenu { rowMenu(entry) }
                     .onDrag { promise(for: entry) }
                     .accessibilityElement(children: .combine)
@@ -805,12 +805,11 @@ struct SFTPWindowView: View {
     ///
     /// The rules themselves are `SFTPSelection` in the core, so the list view, the
     /// icon view and the tests all share one implementation.
-    private func select(_ entry: RemoteEntry) {
-        let modifiers = NSEvent.modifierFlags
+    private func select(_ entry: RemoteEntry, flags: NSEvent.ModifierFlags) {
         let mode: SFTPSelectionMode
-        if modifiers.contains(.command) {
+        if flags.contains(.command) {
             mode = .toggle
-        } else if modifiers.contains(.shift) {
+        } else if flags.contains(.shift) {
             mode = .extend
         } else {
             mode = .replace
