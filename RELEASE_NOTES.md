@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 19
+## KRemote 1.8.0 beta 20
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -48,6 +48,22 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### New: live CPU and memory in the status bar
+
+Every connected session shows `CPU 12% · RAM 63%` next to its state. Click it for
+load average, swap, uptime and the byte figures.
+
+SSH samples over a separate command channel — two `/proc/stat` samples on Linux,
+`top`/`vm_stat` on macOS — leaving the interactive terminal untouched. The samples
+ride one authenticated connection (`ControlMaster`), so a password-only server is
+not asked for a password every five seconds, and the connection is closed when the
+session ends.
+
+RDP carries a desktop, not counters, so an RDP session samples the same host over
+ssh. A Windows box with no ssh simply shows nothing rather than an error.
+
+Sampling runs every five seconds and stops when the pane goes away.
 
 ### Fixed: the archive channel was killing itself
 
@@ -271,7 +287,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.19 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.20 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not

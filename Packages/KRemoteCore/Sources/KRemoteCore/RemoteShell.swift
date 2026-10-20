@@ -23,6 +23,9 @@ public final class RemoteShell: @unchecked Sendable {
     private let password: String
     /// When set, `runElevated` can start a privileged channel.
     private let elevation: ElevationProvider?
+    /// When set, every command rides one authenticated connection instead of
+    /// authenticating again. Used by the metrics sampler, which runs every 5s.
+    private let controlPath: String?
 
     public init(
         host: String,
@@ -30,7 +33,8 @@ public final class RemoteShell: @unchecked Sendable {
         username: String,
         identityFile: String,
         password: String,
-        elevation: ElevationProvider? = nil
+        elevation: ElevationProvider? = nil,
+        controlPath: String? = nil
     ) {
         self.host = host
         self.port = port
@@ -38,6 +42,7 @@ public final class RemoteShell: @unchecked Sendable {
         self.identityFile = identityFile
         self.password = password
         self.elevation = elevation
+        self.controlPath = controlPath
     }
 
     /// Streams the command's stdout to `consume` as it arrives.
@@ -122,9 +127,52 @@ public final class RemoteShell: @unchecked Sendable {
         if port > 0, port != 22 { args += ["-p", String(port)] }
         let key = identityFile.trimmingCharacters(in: .whitespacesAndNewlines)
         if !key.isEmpty { args += ["-i", (key as NSString).expandingTildeInPath] }
+        if let controlPath {
+            // Reuse one authenticated connection. `auto` creates it on the first
+            // call and reuses it afterwards; `ControlPersist` keeps it alive between
+            // samples so authentication is paid once, not every five seconds.
+            args += ["-o", "ControlMaster=auto"]
+            args += ["-o", "ControlPath=" + controlPath]
+            args += ["-o", "ControlPersist=300"]
+        }
         args.append(username.isEmpty ? host : "\(username)@\(host)")
         args.append("/bin/sh -c " + ShellQuote.single(command))
         return args
+    }
+
+    /// Closes the shared connection, if this shell opened one.
+    ///
+    /// `ssh -O exit` is the supported way: it asks the master to shut down and
+    /// unlinks its socket. Deleting the socket file would leave the master process
+    /// running and unreachable.
+    public func closeControlMaster() {
+        guard let controlPath else { return }
+        var args = ["ssh", "-o", "ControlPath=" + controlPath, "-O", "exit"]
+        args.append(username.isEmpty ? host : "\(username)@\(host)")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = Array(args.dropFirst())
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try? process.run()
+        process.waitUntilExit()
+    }
+}
+
+extension RemoteShell {
+    /// The socket path for a control master, unique per user+host+port.
+    ///
+    /// Hashed rather than concatenated: a host name can exceed the 104-byte
+    /// `sockaddr_un` limit, and an over-long path makes ssh fail with a message
+    /// that says nothing about sockets.
+    public static func controlPath(for host: String, port: Int, username: String, in directory: URL) -> String {
+        let identity = "\(username)@\(host):\(port)"
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in identity.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x1000_0000_01b3
+        }
+        return directory.appendingPathComponent(String(format: "%016llx.sock", hash)).path
     }
 }
 

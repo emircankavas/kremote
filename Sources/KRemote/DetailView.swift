@@ -350,6 +350,20 @@ private struct SessionContent: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer()
+            // Live load for the SSH pane. Keyed on the connection so switching a
+            // session in this pane rebinds the poller rather than showing the
+            // previous server's numbers.
+            if isConnected {
+                MetricsBadge(
+                    host: model.effective(session.nodeID)?.host ?? "",
+                    port: model.effective(session.nodeID)?.port ?? 22,
+                    username: model.effective(session.nodeID)?.username ?? "",
+                    identityFile: model.effective(session.nodeID)?.identityFile ?? "",
+                    password: model.effective(session.nodeID)?.password ?? "",
+                    isActive: true
+                )
+                .id(session.nodeID)
+            }
             if let node = model.find(session.nodeID) {
                 Text(model.effective(node.id)?.summary ?? "")
                     .font(.caption)
@@ -368,6 +382,11 @@ private struct SessionContent: View {
 
     private var isDisconnected: Bool {
         if case .disconnected = state { return true }
+        return false
+    }
+
+    private var isConnected: Bool {
+        if case .connected = state { return true }
         return false
     }
 
@@ -568,6 +587,20 @@ private struct RDPSessionContent: View {
                 .font(.caption2)
                 .foregroundStyle(.quaternary)
                 .lineLimit(1)
+            // RDP carries a desktop, not counters, so the load figures come over an
+            // ssh channel to the same host. When the host has no ssh (a plain
+            // Windows box), the badge stays silent rather than showing an error.
+            if isRDPConnected {
+                MetricsBadge(
+                    host: model.effective(nodeID)?.host ?? "",
+                    port: 22,
+                    username: model.effective(nodeID)?.username ?? "",
+                    identityFile: model.effective(nodeID)?.identityFile ?? "",
+                    password: model.effective(nodeID)?.password ?? "",
+                    isActive: true
+                )
+                .id(nodeID)
+            }
             if isDisconnected {
                 Button("Reconnect") { model.reconnect(session.id) }
                     .controlSize(.small)
@@ -606,5 +639,10 @@ private struct RDPSessionContent: View {
             return "Disconnected"
         case .failed(let reason): return "Failed — \(reason)"
         }
+    }
+
+    private var isRDPConnected: Bool {
+        if case .connected = state { return true }
+        return false
     }
 }
