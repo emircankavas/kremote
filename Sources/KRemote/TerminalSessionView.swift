@@ -20,6 +20,14 @@ struct TerminalSessionView: NSViewRepresentable {
     let remoteCommand: String
 
     var inputRequests: Int = 0
+    /// A snippet command to run, paired with the counter that announced it.
+    ///
+    /// Separate from `inputRequests` (which writes a command and an optional
+    /// password) because a snippet needs no password and must not be mistaken for a
+    /// `sudo` request: the two would otherwise clear each other's counters.
+    var snippetRequests: Int = 0
+    var snippetCommand: String = ""
+    var onSnippetHandled: @MainActor () -> Void = {}
     /// Command written when `inputRequests` changes (e.g. `sudo -S -i`).
     var pendingCommand: String = ""
     /// Password written (with a newline) shortly after the command, when the
@@ -53,11 +61,23 @@ struct TerminalSessionView: NSViewRepresentable {
         context.coordinator.attach(view: view, onStateChange: onStateChange, onTitleChange: onTitleChange)
         context.coordinator.installFocusMonitor(view: view, onFocus: onFocus)
         context.coordinator.lastInputRequest = inputRequests
+        context.coordinator.lastSnippetRequest = snippetRequests
         return view
     }
 
     func updateNSView(_ view: TerminalView, context: Context) {
         context.coordinator.updateFocusHandler(onFocus)
+        // A snippet arrives as one line: the script itself is base64 inside it, so
+        // nothing in the body can leak into the terminal's line discipline.
+        let previousSnippet = context.coordinator.lastSnippetRequest
+        if snippetRequests != previousSnippet {
+            context.coordinator.lastSnippetRequest = snippetRequests
+            if snippetRequests > previousSnippet, !snippetCommand.isEmpty {
+                context.coordinator.write(snippetCommand + "\n")
+                onSnippetHandled()
+            }
+        }
+
         // Fire only when the counter *increases*. A decrease happens when a
         // session stops being the root target, and must not be mistaken for a
         // fresh request.
@@ -93,6 +113,7 @@ struct TerminalSessionView: NSViewRepresentable {
         private var onFocus: (@MainActor () -> Void)?
 
         var lastInputRequest = 0
+        var lastSnippetRequest = 0
 
         init(
             host: String,

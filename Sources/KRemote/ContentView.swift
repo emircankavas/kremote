@@ -41,6 +41,20 @@ struct ContentView: View {
         .sheet(item: $model.editingNodeID) { id in
             ConnectionEditorView(nodeID: id) { model.editingNodeID = nil }
         }
+        // Confirmation comes before execution: a snippet is code, and the menu is one
+        // click from a production server.
+        .sheet(item: $model.pendingSnippet) { pending in
+            SnippetConfirmSheet(pending: pending)
+        }
+        .sheet(isPresented: $model.isCreatingSnippet, onDismiss: {
+            // A new snippet closes the sheet directly from the editor, so nothing is
+            // left to do here beyond keeping the flag honest.
+        }) {
+            SnippetEditorView(snippetID: nil) { model.isCreatingSnippet = false }
+        }
+        .sheet(item: $model.editingSnippetID) { id in
+            SnippetEditorView(snippetID: id) { model.editingSnippetID = nil }
+        }
         .fileImporter(
             isPresented: $model.isImportingConfCons,
             allowedContentTypes: [.xml],
@@ -120,6 +134,8 @@ struct SessionToolbarItems: View {
         .help("Browse this server's files over SFTP (⇧⌘S)")
         .accessibilityLabel("Browse files over SFTP")
         .disabled(sftpTarget == nil)
+
+        SnippetMenuButton()
 
         Button {
             model.requestRoot()

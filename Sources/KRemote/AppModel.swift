@@ -61,11 +61,143 @@ final class AppModel {
     private let store: NodeStore
     private let secrets: SecretStore
 
-    init(store: NodeStore = .defaultStore(), secrets: SecretStore? = nil) {
+    // MARK: - Snippets
+
+    /// The user's script library, in menu order.
+    private(set) var snippets: [Snippet] = []
+    /// Set to a snippet's id to present its editor.
+    var editingSnippetID: Snippet.ID?
+    /// Set to present a blank editor for a new snippet.
+    var isCreatingSnippet = false
+
+    /// A snippet waiting for confirmation, and the session it would run on.
+    ///
+    /// Holding the *session* here rather than reading focus at run time matters: the
+    /// confirmation sheet can steal focus, and a script must never land in a pane the
+    /// user did not aim at.
+    var pendingSnippet: PendingSnippet?
+
+    struct PendingSnippet: Identifiable {
+        let id = UUID()
+        let snippet: Snippet
+        let sessionID: Session.ID
+        /// Which surface the command goes to, so the terminal can pick it up.
+        let request: Int
+    }
+
+    /// Bumped per request so a repeat of the same snippet is still a new event.
+    private var snippetRequestCounter = 0
+
+    private let snippetStore: SnippetStore
+
+    init(
+        store: NodeStore = .defaultStore(),
+        secrets: SecretStore? = nil,
+        snippetStore: SnippetStore = .defaultStore()
+    ) {
         self.store = store
         self.secrets = secrets ?? EncryptedSecretStore.defaultStore()
+        self.snippetStore = snippetStore
         load()
+        loadSnippets()
         migrateLegacyKeychainIfNeeded()
+    }
+
+    /// Reads the snippet library. A broken file must not stop the app from opening,
+    /// so the failure is surfaced and the library comes up empty.
+    func loadSnippets() {
+        do {
+            snippets = (try snippetStore.load() ?? []).sorted(by: Self.snippetOrder)
+        } catch {
+            lastError = "Could not load snippets: \(error)"
+            snippets = []
+        }
+    }
+
+    /// Menu order: explicit index, then name, so the order the user arranged survives.
+    static func snippetOrder(_ a: Snippet, _ b: Snippet) -> Bool {
+        a.sortIndex == b.sortIndex
+            ? a.name.localizedStandardCompare(b.name) == .orderedAscending
+            : a.sortIndex < b.sortIndex
+    }
+
+    private func saveSnippets() {
+        do {
+            try snippetStore.save(snippets)
+        } catch {
+            lastError = "Could not save snippets: \(error)"
+        }
+    }
+
+    /// Adds or replaces a snippet and persists.
+    func upsertSnippet(_ snippet: Snippet) {
+        if let index = snippets.firstIndex(where: { $0.id == snippet.id }) {
+            snippets[index] = snippet
+        } else {
+            snippets.append(snippet)
+        }
+        snippets.sort(by: Self.snippetOrder)
+        saveSnippets()
+    }
+
+    func deleteSnippet(_ id: Snippet.ID) {
+        snippets.removeAll { $0.id == id }
+        saveSnippets()
+    }
+
+    /// Asks to run `snippet` on the focused SSH session.
+    ///
+    /// Nothing runs from here: the question is asked first, and `confirmSnippet` is
+    /// what reaches the terminal. RDP and non-SSH sessions have no shell to send to,
+    /// so the menu item is disabled rather than failing silently.
+    func requestSnippet(_ snippet: Snippet) {
+        guard let session = focusedSession,
+              let node = find(session.nodeID), node.supportsSSH else {
+            lastError = "Snippets run in an SSH session. Open one first."
+            return
+        }
+        snippetRequestCounter += 1
+        pendingSnippet = PendingSnippet(
+            snippet: snippet,
+            sessionID: session.id,
+            request: snippetRequestCounter
+        )
+    }
+
+    /// The user said yes: hand the command to the terminal in that session.
+    func confirmSnippet() {
+        guard let pending = pendingSnippet else { return }
+        pendingSnippet = nil
+        snippetTarget = pending.sessionID
+        snippetRequest = pending.request
+        // A marker first, so the user's scrollback shows which snippet ran. It is a
+        // shell comment: it cannot execute, cannot be a syntax error in any POSIX sh,
+        // and stays visible above the script's own output.
+        let marker = "# KRemote snippet: " + pending.snippet.name
+            .replacingOccurrences(of: "\n", with: " ")
+        snippetCommand = marker + "\n" + SnippetLibrary.command(for: pending.snippet)
+    }
+
+    func cancelSnippet() {
+        pendingSnippet = nil
+    }
+
+    /// A session's display title, for the confirmation sheet.
+    func sessionTitle(for id: Session.ID) -> String? {
+        sessions.first { $0.id == id }?.displayTitle
+    }
+
+    /// Which session a snippet command is aimed at (mirrors `rootTarget`).
+    private(set) var snippetTarget: Session.ID?
+    /// Incremented when a command is ready to be typed.
+    private(set) var snippetRequest = 0
+    /// The command to run, built once so the terminal does not re-derive it.
+    private(set) var snippetCommand = ""
+
+    /// Called by the pane once it has handed the command over.
+    func snippetHandled() {
+        snippetCommand = ""
+        snippetTarget = nil
     }
 
     // MARK: - Persistence

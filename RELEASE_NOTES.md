@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 25
+## KRemote 1.8.0 beta 26
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -48,6 +48,26 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### New: snippets
+
+A toolbar menu holds saved scripts and runs one on the focused SSH session.
+
+The script is **sent as a file, not typed into the terminal**. Pasting a multi-line
+script into a pty makes the shell run it line by line as the bytes arrive, which
+mangles quotes, heredocs and `if` blocks and makes a half-finished run impossible to
+abort. The body travels base64-encoded — a script can contain any byte, and quoting
+it would break on the first `'` — is written to a temp file on the server, run with
+`sh`, and removed by the command itself, so a failed run does not leave an executable
+copy of your script behind. The script's own exit code is what the command returns.
+
+Every run is confirmed first, with the script shown rather than its name — the name
+is the part you already trust. A body that looks destructive gets a louder dialog and
+an orange button.
+
+Snippets are shared across all connections, saved in
+`~/Library/Application Support/KRemote/snippets.json`, and can be created, edited and
+deleted from the same menu.
 
 ### Fixed: the reason was unreachable
 
@@ -367,7 +387,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.25 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.26 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not

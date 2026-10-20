@@ -286,6 +286,12 @@ private struct SessionContent: View {
                 identityFile: effective?.identityFile ?? "",
                 remoteCommand: effective?.remoteCommand ?? "",
                 inputRequests: model.rootTarget == session.id ? model.rootRequest : 0,
+                // A snippet is delivered only to the session it was confirmed for:
+                // the sheet that asks can move focus, and a script must never land
+                // in a pane the user did not aim at.
+                snippetRequests: model.snippetTarget == session.id ? model.snippetRequest : 0,
+                snippetCommand: model.snippetTarget == session.id ? model.snippetCommand : "",
+                onSnippetHandled: { model.snippetHandled() },
                 pendingCommand: rootCommand(for: effective),
                 pendingPassword: effective?.password ?? "",
                 onStateChange: { newState in
