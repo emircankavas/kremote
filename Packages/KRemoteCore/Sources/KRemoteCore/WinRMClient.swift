@@ -76,10 +76,11 @@ public struct WinRMClient: Sendable {
     }
 
     private func runSync(command: String) throws -> String {
-        let connection = try SocketConnection(
+        let connection = try WinRMConnection(
             host: configuration.host,
             port: configuration.port,
-            timeout: configuration.timeout
+            timeout: configuration.timeout,
+            useTLS: configuration.useTLS
         )
         defer { connection.close() }
 
@@ -229,135 +230,6 @@ public struct WinRMClient: Sendable {
         case 500: return "The server reported an error."
         default: return "The server answered with HTTP \(status)."
         }
-    }
-}
-
-// MARK: - Socket
-
-/// One HTTP/1.1 connection, kept open for both NTLM legs.
-///
-/// Exists because the challenge is bound to the connection: see the note on
-/// `WinRMClient`.
-final class SocketConnection {
-    struct Response {
-        let status: Int
-        let headers: String
-        let body: Data
-    }
-
-    private let descriptor: Int32
-
-    init(host: String, port: Int, timeout: TimeInterval) throws {
-        descriptor = socket(AF_INET, SOCK_STREAM, 0)
-        guard descriptor >= 0 else { throw WinRMError.unreachable("Could not open a socket.") }
-
-        var seconds = Int(timeout)
-        setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &seconds, socklen_t(MemoryLayout<Int>.size))
-        setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &seconds, socklen_t(MemoryLayout<Int>.size))
-
-        var address = sockaddr_in()
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = CFSwapInt16HostToBig(UInt16(port))
-        address.sin_addr.s_addr = inet_addr(host)
-        if address.sin_addr.s_addr == INADDR_NONE {
-            guard let resolved = SocketConnection.resolve(host: host) else {
-                close()
-                throw WinRMError.unreachable("Could not resolve \"\(host)\".")
-            }
-            address.sin_addr = resolved
-        }
-
-        let result = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard result == 0 else {
-            close()
-            throw WinRMError.unreachable(
-                "Could not reach \(host):\(port). Is WinRM enabled and the firewall open?"
-            )
-        }
-    }
-
-    func close() {
-        _ = Darwin.close(descriptor)
-    }
-
-    /// Sends one request and reads exactly one response.
-    func request(path: String, contentType: String, authorization: String, body: String) throws -> Response {
-        var text = "POST \(path) HTTP/1.1\r\n"
-        text += "Host: localhost\r\n"
-        text += "Content-Type: \(contentType)\r\n"
-        text += "Content-Length: \(body.utf8.count)\r\n"
-        text += "Connection: keep-alive\r\n"
-        text += "Authorization: \(authorization)\r\n\r\n"
-        text += body
-
-        let bytes = Array(text.utf8)
-        var sent = 0
-        while sent < bytes.count {
-            let written = bytes.withUnsafeBufferPointer {
-                Darwin.write(descriptor, $0.baseAddress! + sent, bytes.count - sent)
-            }
-            guard written > 0 else {
-                throw WinRMError.unreachable("The connection was closed while sending.")
-            }
-            sent += written
-        }
-
-        var buffer = Data()
-        var chunk = [UInt8](repeating: 0, count: 16_384)
-        var headerEnd: Int?
-        var contentLength = 0
-
-        while true {
-            let count = Darwin.read(descriptor, &chunk, chunk.count)
-            if count < 0 {
-                throw WinRMError.unreachable("The server did not answer in time.")
-            }
-            if count == 0 { break }
-            buffer.append(contentsOf: chunk[0..<count])
-
-            if headerEnd == nil, let range = buffer.range(of: Data("\r\n\r\n".utf8)) {
-                headerEnd = range.upperBound
-                let head = String(decoding: buffer[..<range.lowerBound], as: UTF8.self)
-                for line in head.components(separatedBy: "\r\n")
-                where line.lowercased().hasPrefix("content-length:") {
-                    contentLength = Int(line.components(separatedBy: ":").last?
-                        .trimmingCharacters(in: .whitespaces) ?? "0") ?? 0
-                }
-            }
-            if let start = headerEnd, buffer.count >= start + contentLength { break }
-        }
-
-        let all = String(decoding: buffer, as: UTF8.self)
-        let head = all.components(separatedBy: "\r\n\r\n").first ?? ""
-        let statusLine = head.components(separatedBy: "\r\n").first ?? ""
-        let status = Int(statusLine.components(separatedBy: " ").dropFirst().first ?? "0") ?? 0
-
-        var bodyData = Data()
-        if let start = headerEnd, buffer.count > start {
-            bodyData = buffer.subdata(in: start..<buffer.count)
-        }
-        return Response(status: status, headers: head, body: bodyData)
-    }
-
-    private static func resolve(host: String) -> in_addr? {
-        var hints = addrinfo()
-        hints.ai_family = AF_INET
-        hints.ai_socktype = SOCK_STREAM
-        var result: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(host, nil, &hints, &result) == 0, let info = result else { return nil }
-        defer { freeaddrinfo(result) }
-        for entry in sequence(first: info, next: { $0.pointee.ai_next }) {
-            if let address = entry.pointee.ai_addr {
-                return address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
-                    $0.pointee.sin_addr
-                }
-            }
-        }
-        return nil
     }
 }
 

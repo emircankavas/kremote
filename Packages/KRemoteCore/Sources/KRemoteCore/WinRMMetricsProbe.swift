@@ -25,6 +25,38 @@ public enum WinRMMetricsProbe {
     /// Samples once.
     ///
     /// `FreePhysicalMemory` and `TotalVisibleMemorySize` are in kilobytes.
+    /// Tries 5985 and then 5986.
+    ///
+    /// RDP says nothing about which WinRM listener a host has: `Enable-PSRemoting`
+    /// creates the plaintext one, and hardened or domain-joined machines often only
+    /// allow the encrypted one. Asking the user for a port they may not know is worse
+    /// than trying both, so the badge does that and remembers which answered.
+    public static func sampleAutomatically(
+        host: String,
+        username: String,
+        password: String,
+        timeout: TimeInterval = 8
+    ) async throws -> SystemMetrics {
+        var lastError: Error?
+        // The plaintext listener is the common case, so it goes first and costs one
+        // connection when it works.
+        for port in [5985, 5986] {
+            do {
+                return try await sample(
+                    host: host, username: username, password: password,
+                    port: port, timeout: timeout
+                )
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? WinRMError.unreachable("WinRM is not reachable on \(host).")
+    }
+
+    /// Whether a port speaks TLS. 5986 is the encrypted listener; everything else
+    /// is treated as plaintext.
+    public static func tlsRequired(for port: Int) -> Bool { port == 5986 }
+
     public static func sample(
         host: String,
         username: String,
@@ -37,6 +69,10 @@ public enum WinRMMetricsProbe {
             port: port,
             username: username,
             password: password,
+            // 5986 is the encrypted listener. Derived from the port rather than
+            // asked for separately: a caller that picked the HTTPS port wants TLS,
+            // and forgetting to say so was a live bug.
+            useTLS: tlsRequired(for: port),
             timeout: timeout
         ))
         let output = try await client.runPowerShell(script)

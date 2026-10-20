@@ -191,7 +191,10 @@ struct MetricsBadge: View {
             polling = Task {
                 while !Task.isCancelled {
                     do {
-                        let sample = try await WinRMMetricsProbe.sample(
+                        // 5985 first, then 5986: RDP does not say which listener
+                        // the host has, and a hardened machine may only allow the
+                        // encrypted one.
+                        let sample = try await WinRMMetricsProbe.sampleAutomatically(
                             host: host, username: username, password: password)
                         await MainActor.run {
                             metrics = sample

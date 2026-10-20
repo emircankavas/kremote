@@ -6,15 +6,23 @@ import Foundation
 /// then `Send` runs it, then `Receive` collects the streams. Doing it in one request
 /// is refused with "requires the following selector: ShellId".
 ///
-/// Kept as its own type because the HTTP plumbing (`SocketConnection`) is about one
+/// Kept as its own type because the HTTP plumbing (`WinRMConnection`) is about one
 /// connection, and this is about the protocol spoken over it — the split makes both
 /// testable on their own.
 struct WinRMSession {
-    let connection: SocketConnection
+    let connection: WinRMConnection
     let configuration: WinRMClient.Configuration
     let timeoutSeconds: Int
 
     private(set) var authenticated = false
+    /// The Authorization header to reuse on every later request.
+    ///
+    /// Not empty: a WinRM connection is authenticated *per message*, not by the
+    /// state of the socket. Sending `Authorization: ""` after a successful handshake
+    /// makes every shell and command request anonymous, which the server refuses —
+    /// and it refuses in a way that reads like a protocol error, not a credentials
+    /// one.
+    private var authorization = ""
 
     /// The connection's NTLM challenge must be answered on the connection that
     /// issued it — see `WinRMClient`.
@@ -53,6 +61,7 @@ struct WinRMSession {
                 "WinRM rejected the credentials for \(configuration.host)."
             )
         }
+        authorization = "Negotiate " + message.base64EncodedString()
         authenticated = true
     }
 
@@ -116,6 +125,10 @@ struct WinRMSession {
         let response = try connection.request(
             path: "/wsman",
             contentType: "application/soap+xml;charset=UTF-8",
+            // Empty on purpose. NTLM over HTTP authenticates the *connection*: once
+            // the handshake completes, the server keeps that state for the socket's
+            // lifetime and re-sending the token makes it fail with 401. This cost a
+            // debugging round — the empty header looks like a bug, and is correct.
             authorization: "",
             body: body
         )
@@ -299,7 +312,7 @@ struct WinRMSession {
         return nil
     }
 
-    static func fault(in response: SocketConnection.Response) -> String? {
+    static func fault(in response: WinRMConnection.Response) -> String? {
         fault(in: response.body)
     }
 

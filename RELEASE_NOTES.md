@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 22
+## KRemote 1.8.0 beta 23
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -48,6 +48,24 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### Fixed: RDP load figures on hosts that only allow WinRM over TLS
+
+Two real faults, both verified against a Windows host on 5985 and 5986.
+
+The HTTPS listener was never used: the option existed and nothing applied it, so a
+host that only allows 5986 could not answer at all. Encrypted WinRM works now.
+
+The port is also discovered: 5985 first, then 5986. RDP says nothing about which
+listener a machine has, and asking the user for a WinRM port they may not know is
+worse than trying both.
+
+Two things that were wrong along the way, worth recording because they looked like
+protocol failures and were not: WinRM binds its NTLM challenge to the TCP
+connection, so a client that redials between the handshake and the answer is refused
+even with a correct message; and the plaintext path must send no `Authorization`
+header after the handshake, because NTLM authenticates the connection rather than
+each request.
 
 ### Fixed: the CPU and memory figures were invisible
 
@@ -321,7 +339,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.22 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.23 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not
