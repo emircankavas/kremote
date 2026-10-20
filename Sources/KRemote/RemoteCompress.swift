@@ -91,14 +91,32 @@ enum RemoteCompress {
         var archivePath: String?
 
         do {
-            let output = try await shell.run(
-                script(paths: entries.map(\.path), archiveName: suggestedName(for: entries)),
-                timeout: 3600
-            ) { chunk in
-                if isCancelled() { return }
-                try? handle.write(contentsOf: chunk)
-                let total = counter.add(Int64(chunk.count))
-                progress?(total, nil)
+            // Unprivileged first: most selections are readable, and sudo is a
+            // second login that should not be paid for when it is not needed.
+            var output: RemoteShell.Output
+            do {
+                output = try await stream(
+                    shell: shell,
+                    elevated: false,
+                    entries: entries,
+                    handle: handle,
+                    counter: counter,
+                    progress: progress,
+                    isCancelled: isCancelled
+                )
+            } catch {
+                // Only a refusal is worth retrying as root: a timeout or a broken
+                // pipe fails the same way and would just cost another login.
+                guard Self.isPermissionDenied(error) else { throw error }
+                output = try await stream(
+                    shell: shell,
+                    elevated: true,
+                    entries: entries,
+                    handle: handle,
+                    counter: counter,
+                    progress: progress,
+                    isCancelled: isCancelled
+                )
             }
             try? handle.close()
 
@@ -136,6 +154,39 @@ enum RemoteCompress {
         if let directory = archivePath.map({ ($0 as NSString).deletingLastPathComponent }) {
             _ = try? await shell.run(cleanupScript(directory: directory), timeout: 30)
         }
+    }
+
+
+    /// One attempt at archiving, privileged or not. The archive bytes go straight
+    /// into `handle`; the script's temp directory is reported on stderr.
+    private static func stream(
+        shell: RemoteShell,
+        elevated: Bool,
+        entries: [RemoteEntry],
+        handle: FileHandle,
+        counter: ReceivedCounter,
+        progress: (@Sendable (Int64, Int64?) -> Void)?,
+        isCancelled: @escaping @Sendable () -> Bool
+    ) async throws -> RemoteShell.Output {
+        let command = script(paths: entries.map(\.path), archiveName: suggestedName(for: entries))
+        let consume: @Sendable (Data) -> Void = { chunk in
+            if isCancelled() { return }
+            try? handle.write(contentsOf: chunk)
+            progress?(counter.add(Int64(chunk.count)), nil)
+        }
+        return elevated
+            ? try await shell.runElevated(command, timeout: 3600, consume: consume)
+            : try await shell.run(command, timeout: 3600, consume: consume)
+    }
+
+    /// True when the failure is the server refusing to read a path, which is the
+    /// only case elevation can fix.
+    static func isPermissionDenied(_ error: Error) -> Bool {
+        let text = ((error as? LocalizedError)?.errorDescription ?? String(describing: error))
+            .lowercased()
+        return text.contains("permission denied")
+            || text.contains("cannot stat")
+            || text.contains("cannot open")
     }
 
     /// A name for the archive: the single item's, or a dated "Selection".

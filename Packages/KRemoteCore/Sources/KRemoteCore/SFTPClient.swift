@@ -31,6 +31,17 @@ public protocol ElevationProvider: AnyObject, Sendable {
     /// `nil` means "cannot elevate" — the caller then rethrows the permission
     /// error rather than looping.
     func elevatedTransport(for path: String) async -> SFTPTransport?
+
+    /// An elevated channel that runs `command` rather than an SFTP subsystem.
+    ///
+    /// Needed by work that is not SFTP at all — archiving a selection with the
+    /// server's own `tar`. The default refuses, so a provider that only knows how
+    /// to start a subsystem keeps compiling and simply cannot elevate a command.
+    func elevatedTransport(running command: String) async -> SFTPTransport?
+}
+
+extension ElevationProvider {
+    public func elevatedTransport(running command: String) async -> SFTPTransport? { nil }
 }
 
 /// Why elevation is or is not on offer for a connection.

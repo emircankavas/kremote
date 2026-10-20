@@ -75,13 +75,21 @@ final class SFTPSession: Identifiable {
     /// Opens a shell channel on the same server, for work SFTP v3 cannot ask for
     /// (compressing a selection into one archive). A second ssh connection, not a
     /// second SFTP session: the subsystem has no way to run a program.
+    /// Whether this connection can elevate at all. The window reads it to say why
+    /// an archive failed rather than offering a retry that cannot work.
+    var canElevate: Bool { client.elevationAvailability.isAvailable }
+
+    /// The sudo provider used by both the SFTP retry and the elevated shell.
+    private func makeElevation() -> ElevationProvider? { elevation }
+
     func makeShell() -> RemoteShell {
         RemoteShell(
             host: connection.host,
             port: connection.port,
             username: connection.username,
             identityFile: connection.identityFile,
-            password: connection.password
+            password: connection.password,
+            elevation: makeElevation()
         )
     }
 
@@ -106,18 +114,22 @@ final class SFTPSession: Identifiable {
     }
 
     private let connection: Connection
+    /// The sudo provider shared by the SFTP retry and the elevated shell.
+    private let elevation: ElevationProvider?
 
     init(
         nodeID: ConnectionNode.ID,
         title: String,
         target: String,
         connection: Connection,
+        elevation: ElevationProvider?,
         makeClient: @escaping () -> SFTPClient
     ) {
         self.nodeID = nodeID
         self.title = title
         self.target = target
         self.connection = connection
+        self.elevation = elevation
         self.makeClient = makeClient
         self.client = makeClient()
     }

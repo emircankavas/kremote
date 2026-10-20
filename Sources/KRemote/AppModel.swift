@@ -565,6 +565,18 @@ final class AppModel {
             lastError = "This connection has no host set."
             return nil
         }
+        // One provider for the whole session: the SFTP retry and the elevated
+        // shell (Compress and Download) must agree on whether sudo is available.
+        let sudoTarget = SudoTarget(
+            nodeID: nodeID,
+            host: effective.host,
+            port: effective.port,
+            username: effective.username,
+            identityFile: effective.identityFile,
+            usesSudo: node.usesSudo
+        )
+        let provider = SudoElevationProvider(target: sudoTarget, secretStore: self.secrets)
+
         // The builder is captured, not the client: Retry after a lost connection
         // needs a brand-new ssh process, which is what this closure makes.
         // Only ever invoked from the main actor (openSFTP / reconnect), so it is
@@ -592,15 +604,6 @@ final class AppModel {
             // Elevation is per operation and only wired when the node opted in: the
             // provider returns nil without the flag or without a usable password, and
             // the base channel keeps serving everything the login user may do.
-            let sudoTarget = SudoTarget(
-                nodeID: nodeID,
-                host: effective.host,
-                port: effective.port,
-                username: effective.username,
-                identityFile: effective.identityFile,
-                usesSudo: node.usesSudo
-            )
-            let provider = SudoElevationProvider(target: sudoTarget, secretStore: self.secrets)
             return SFTPClient(transport: transport, elevation: provider)
         }
         let user = effective.username.isEmpty ? "" : "\(effective.username)@"
@@ -615,6 +618,7 @@ final class AppModel {
                 identityFile: effective.identityFile,
                 password: effective.password
             ),
+            elevation: provider,
             makeClient: makeClient
         )
         sftpSessions.append(session)

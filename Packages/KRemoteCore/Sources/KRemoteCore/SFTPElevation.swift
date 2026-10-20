@@ -615,6 +615,24 @@ public final class SudoElevationProvider: ElevationProvider, @unchecked Sendable
         return factory(ElevationCommand.remoteCommand, line)
     }
 
+    /// An elevated channel that runs `command` instead of the SFTP subsystem.
+    ///
+    /// `elevatedTransport(for:)` always starts a subsystem, which is right for a
+    /// refused file operation but useless for work that is not SFTP at all —
+    /// archiving a selection with the server's own `tar` needs the command to be
+    /// the thing sudo runs. The sudo handshake is identical, so it goes through
+    /// the same `SudoSFTPTransport`: one stdin password line, one typed error.
+    public func elevatedTransport(running command: String) async -> SFTPTransport? {
+        guard target.usesSudo else { return nil }
+        guard let stored = (try? secretStore.secret(for: target.nodeID)) ?? nil,
+              Self.isUsable(password: stored) else {
+            return nil
+        }
+        let line = Data((stored + "\n").utf8)
+        let remote = "sudo -S -p '' /bin/sh -c " + ShellQuote.single(command)
+        return factory(remote, line)
+    }
+
     /// Answered without exposing the secret: the flag and whether a usable
     /// password is stored.
     public var elevationAvailability: ElevationAvailability {
