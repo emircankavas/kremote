@@ -63,12 +63,22 @@ final class WinRMConnection {
             var failure: String?
             connection.stateUpdateHandler = { state in
                 switch state {
-                case .ready: ready.signal()
+                case .ready:
+                    ready.signal()
                 case .failed(let error):
                     failure = error.localizedDescription
                     ready.signal()
-                case .cancelled: ready.signal()
-                default: break
+                // `.waiting` is not a terminal state, but a refused connection sits
+                // here forever without ever failing. Surfacing it turns a five-second
+                // silent timeout into an explanation, and a refused port is the most
+                // common reason a WinRM badge stays empty.
+                case .waiting(let error):
+                    failure = error.localizedDescription
+                    ready.signal()
+                case .cancelled:
+                    ready.signal()
+                default:
+                    break
                 }
             }
             connection.start(queue: queue)
@@ -217,55 +227,56 @@ final class WinRMConnection {
         }
     }
 
-    /// Opens a plain TCP socket.
+    /// Opens a plain TCP socket to the first address that accepts a connection.
+    ///
+    /// Tries every address the name resolves to, IPv4 and IPv6, in the order the
+    /// system prefers. A Windows WinRM listener bound to `::` reports IPv6 only, and
+    /// a client that dialled IPv4 exclusively could never reach it — which is exactly
+    /// what a `LocalAddress ::` listener in `Get-NetTCPConnection` means.
     private static func openSocket(host: String, port: Int, timeout: TimeInterval) throws -> Int32 {
-        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
-        guard descriptor >= 0 else { throw WinRMError.unreachable("Could not open a socket.") }
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        hints.ai_protocol = IPPROTO_TCP
 
-        var seconds = Int(timeout)
-        setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &seconds, socklen_t(MemoryLayout<Int>.size))
-        setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &seconds, socklen_t(MemoryLayout<Int>.size))
-
-        var address = sockaddr_in()
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = CFSwapInt16HostToBig(UInt16(port))
-        address.sin_addr.s_addr = inet_addr(host)
-        if address.sin_addr.s_addr == INADDR_NONE {
-            guard let resolved = resolve(host: host) else {
-                _ = Darwin.close(descriptor)
-                throw WinRMError.unreachable("Could not resolve \"\(host)\".")
-            }
-            address.sin_addr = resolved
-        }
-
-        let result = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard result == 0 else {
-            _ = Darwin.close(descriptor)
+        var result: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(host, String(port), &hints, &result)
+        guard status == 0, let first = result else {
             throw WinRMError.unreachable(
-                "Could not reach \(host):\(port). Is WinRM enabled and the firewall open?"
+                "Could not resolve \"\(host)\"\(status == 0 ? "" : " (error \(status))")."
             )
         }
-        return descriptor
+        defer { freeaddrinfo(result) }
+
+        var lastFailure = "no address to try"
+        for entry in sequence(first: first, next: { $0.pointee.ai_next }) {
+            let family = entry.pointee.ai_family
+            guard family == AF_INET || family == AF_INET6,
+                  let address = entry.pointee.ai_addr else { continue }
+
+            let descriptor = socket(family, SOCK_STREAM, IPPROTO_TCP)
+            if descriptor < 0 {
+                lastFailure = "could not open a socket"
+                continue
+            }
+
+            var seconds = Int(timeout)
+            setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &seconds, socklen_t(MemoryLayout<Int>.size))
+            setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &seconds, socklen_t(MemoryLayout<Int>.size))
+
+            let connected = Darwin.connect(descriptor, address, entry.pointee.ai_addrlen)
+            if connected == 0 { return descriptor }
+
+            // Report what actually happened: "refused" and "timed out" point at
+            // different fixes (no listener vs. a firewall dropping the packet).
+            lastFailure = String(cString: strerror(errno))
+            _ = Darwin.close(descriptor)
+        }
+
+        throw WinRMError.unreachable(
+            "Could not reach \(host):\(port) — \(lastFailure). "
+                + "Check that WinRM is listening on that port and that the firewall allows it."
+        )
     }
 
-    private static func resolve(host: String) -> in_addr? {
-        var hints = addrinfo()
-        hints.ai_family = AF_INET
-        hints.ai_socktype = SOCK_STREAM
-        var result: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(host, nil, &hints, &result) == 0, let info = result else { return nil }
-        defer { freeaddrinfo(result) }
-        for entry in sequence(first: info, next: { $0.pointee.ai_next }) {
-            if let address = entry.pointee.ai_addr {
-                return address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
-                    $0.pointee.sin_addr
-                }
-            }
-        }
-        return nil
-    }
 }
