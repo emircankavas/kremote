@@ -1,8 +1,39 @@
-## KRemote 1.8.0 beta 12
+## KRemote 1.8.0 beta 13
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
 `confCons.xml` import.
+
+### New: transfers, file operations and a permissions sheet
+
+The SFTP window can now do the work, not just show the listing.
+
+- **Download** (⌘D) and **Upload** (⌘U), from a save panel, an open panel, or by
+  double-clicking a file. A folder or a multi-selection asks for a destination
+  folder. Nothing is overwritten silently: a clash asks once — **Replace**,
+  **Keep Both** or **Skip** — and the answer covers every conflicting item in
+  that batch.
+- **Drag a file or folder out** to Finder or any other app. Only the drop fetches
+  the bytes; dragging and letting go elsewhere transfers nothing.
+- **Transfer queue** under the listing: bytes done of total, throughput, time
+  left, per-item **Cancel** and **Retry**, **Retry All**, **Cancel All**, and
+  **Reveal in Finder** for a download. Up to three run at once; one failing never
+  cancels the rest. Cancel closes the remote handle and deletes the `.part` file,
+  so a cancelled download leaves nothing behind.
+- **New Folder** (⇧⌘N), **Rename** (Return on a single row), **Delete** (⌘⌫) with a
+  confirmation that names the item and, for a folder, how many items go with it,
+  **Show Info**, and **Refresh**.
+- **Permissions sheet**: owner/group/other **rwx** checkboxes and the octal field
+  stay in sync, and uid/gid start from the server's own values. It applies in one
+  `SETSTAT` and refreshes the row.
+- **Selection** works the way Finder does: plain click, ⌘-click to add or remove,
+  ⇧-click for a range. Every operation acts on the whole selection, and the
+  status bar shows the item count and the total size selected.
+- A batch that partly fails reports **one** summary naming exactly what worked and
+  what did not — never a modal per item.
+
+If a file operation is refused, the alert says whether sudo was tried and, if it
+was not, what to change on the connection to allow it.
 
 ### New: beta release channel
 
@@ -153,10 +184,9 @@ The engine underneath was verified against a live OpenSSH server end to end:
 connect, resolve `~`, list an 88-entry home directory, write a file, read it back,
 stat, chmod 600, rename, delete.
 
-**Not in this build yet:** download/upload, new folder, rename, delete and the
-permissions sheet (the file operations), and automatic `sudo` elevation. Those
-are the next beta. Drag-and-drop upload says so explicitly rather than silently
-doing nothing.
+**Still not in this build:** SCP/FTP/WebDAV, resumable transfers, server-to-server
+copy, symbolic-link creation, drag-and-drop *upload* (drag-out is supported),
+and folder sync.
 
 ### Install
 

@@ -82,6 +82,9 @@ struct SFTPWindowView: View {
     @State private var isConflictPresented = false
     /// One modal that needs the user's answer: a batch summary or a single failure.
     @State private var batchSheet: BatchPrompt?
+    /// Get Info's target and the `stat` values for it.
+    @State private var infoEntry: RemoteEntry?
+    @State private var infoAttributes: SFTPAttributes?
 
     private var viewMode: SFTPViewMode {
         get { SFTPViewMode(rawValue: viewModeRaw) ?? .list }
@@ -112,13 +115,14 @@ struct SFTPWindowView: View {
         .navigationTitle(session.title)
         .task { await session.connect() }
         .background(
-            // Return and Enter open the selected folder. A hidden button is the
-            // only way to bind a bare key to an action in SwiftUI.
+            // Return renames the selected item, the Finder behaviour the card asks
+            // for; ⌘↓ opens a folder. Hidden buttons are the only way to bind a
+            // bare key to an action in SwiftUI.
             Group {
-                Button("") { openSelection() }
+                Button("") { renameSelection() }
                     .keyboardShortcut(.return, modifiers: [])
                 Button("") { openSelection() }
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(.downArrow, modifiers: .command)
             }
             .opacity(0)
             .frame(width: 0, height: 0)
@@ -131,8 +135,7 @@ struct SFTPWindowView: View {
         .onChange(of: session.entries) { _, _ in
             // A selection must not outlive its rows: "Get Info" after a delete
             // would otherwise act on something no longer listed.
-            let paths = Set(session.entries.map(\.path))
-            selection = selection.intersection(paths)
+            selection = SFTPSelection.pruned(selection, to: session.entries.map(\.path))
         }
     }
 
@@ -196,6 +199,9 @@ struct SFTPWindowView: View {
             }
             .sheet(item: $batchSheet) { prompt in
                 promptView(prompt)
+            }
+            .sheet(item: $infoEntry) { entry in
+                infoSheet(entry, infoAttributes)
             }
             .confirmationDialog(
                 "“\(conflictName)” already exists",
@@ -293,6 +299,14 @@ struct SFTPWindowView: View {
             .keyboardShortcut("n", modifiers: [.command, .shift])
             .disabled(!session.isConnected)
 
+            Button { confirmDelete(selectedEntries) } label: {
+                Image(systemName: "trash")
+            }
+            .help("Delete the selection (⌘⌫)")
+            .accessibilityLabel("Delete selection")
+            .keyboardShortcut(.delete, modifiers: .command)
+            .disabled(selection.isEmpty)
+
             Picker("View", selection: Binding(get: { viewMode }, set: { viewMode = $0 })) {
                 ForEach(SFTPViewMode.allCases) { mode in
                     Image(systemName: mode.icon)
@@ -381,7 +395,6 @@ struct SFTPWindowView: View {
                 errorBanner(message)
             }
             contentBody
-            SFTPTransferPanel(session: session)
         }
     }
 
@@ -554,15 +567,10 @@ struct SFTPWindowView: View {
                 .exclusively(before: TapGesture().onEnded { select(entry) })
         )
         .contextMenu { rowMenu(entry) }
-        .draggable(entry.path) {
-            // The drag image is the real icon and name, so a drop target shows what
-            // is being dragged rather than a bare path string.
-            HStack(spacing: 6) {
-                Image(nsImage: FileIcon.image(for: entry))
-                Text(entry.name)
-            }
-            .padding(6)
-        }
+        // Drag-out hands Finder a file promise, not a path string: a promise can
+        // become a real file on drop, which a string cannot. The preview is the
+        // row itself, so the drag image matches what is being dragged.
+        .onDrag { promise(for: entry) }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityText(entry))
         .accessibilityValue(selection.contains(entry.path) ? "selected" : "")
@@ -602,7 +610,7 @@ struct SFTPWindowView: View {
                             .exclusively(before: TapGesture().onEnded { select(entry) })
                     )
                     .contextMenu { rowMenu(entry) }
-                    .draggable(entry.path)
+                    .onDrag { promise(for: entry) }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel(accessibilityText(entry))
                     .accessibilityValue(selection.contains(entry.path) ? "selected" : "")
@@ -767,6 +775,17 @@ struct SFTPWindowView: View {
         renameTarget = entry
     }
 
+    /// Get Info: a sheet with the server's own `stat` values for one entry.
+    private func showInfo(_ entry: RemoteEntry) {
+        infoEntry = entry
+        infoAttributes = entry.attributes
+        Task {
+            guard let attributes = await session.info(for: entry) else { return }
+            // Only apply if the sheet is still about the same row.
+            if infoEntry?.id == entry.id { infoAttributes = attributes }
+        }
+    }
+
     private func confirmDelete(_ entries: [RemoteEntry]) {
         deleteTarget = entries
         deleteItemCount = nil
@@ -782,27 +801,27 @@ struct SFTPWindowView: View {
     // MARK: - Actions
 
     /// Picking a row, with Finder's modifiers: ⌘ toggles, ⇧ extends the range from
-    /// the anchor, a plain click replaces. Shared with the session so Return knows
-    /// what is highlighted.
+    /// the anchor, a plain click replaces.
+    ///
+    /// The rules themselves are `SFTPSelection` in the core, so the list view, the
+    /// icon view and the tests all share one implementation.
     private func select(_ entry: RemoteEntry) {
         let modifiers = NSEvent.modifierFlags
+        let mode: SFTPSelectionMode
         if modifiers.contains(.command) {
-            if selection.contains(entry.path) {
-                selection.remove(entry.path)
-            } else {
-                selection.insert(entry.path)
-            }
-            selectionAnchor = entry.path
-        } else if modifiers.contains(.shift),
-                  let selectionAnchor,
-                  let start = rows.firstIndex(where: { $0.path == selectionAnchor }),
-                  let end = rows.firstIndex(where: { $0.path == entry.path }) {
-            let range = start <= end ? start...end : end...start
-            selection = Set(rows[range].map(\.path))
+            mode = .toggle
+        } else if modifiers.contains(.shift) {
+            mode = .extend
         } else {
-            selection = [entry.path]
-            selectionAnchor = entry.path
+            mode = .replace
         }
+        selection = SFTPSelection.apply(
+            mode,
+            to: selection,
+            anchor: &selectionAnchor,
+            path: entry.path,
+            order: rows.map(\.path)
+        )
         session.selectedPath = selection.count == 1 ? selection.first : nil
     }
 
@@ -814,14 +833,35 @@ struct SFTPWindowView: View {
     }
 
     private func openSelection() {
-        Task { await session.openSelection() }
+        // ⌘↓ on a file downloads it, on a folder opens it — same rule as a
+        // double-click, so the two shortcuts never disagree.
+        if let entry = selectedEntries.first, selectedEntries.count == 1 {
+            open(entry)
+        }
+    }
+
+    /// Return on a single selected row — Finder's rename. A multi-selection has no
+    /// one name to edit, so it does nothing rather than guessing.
+    private func renameSelection() {
+        guard selectedEntries.count == 1, let only = selectedEntries.first else { return }
+        beginRename(only)
     }
 
     private func open(_ entry: RemoteEntry) {
         session.selectedPath = entry.path
-        // A folder navigates; a file is card 5's job (open/download).
-        guard entry.isDirectory else { return }
-        Task { await session.open(entry) }
+        if entry.isDirectory {
+            Task { await session.open(entry) }
+        } else {
+            // Double-clicking a file downloads it: there is no local app to hand a
+            // remote path to, and the card asks for double-click to act on files.
+            download([entry])
+        }
+    }
+
+    /// Drag-out: an item provider whose bytes are fetched only if the item is
+    /// actually dropped, into the temporary staging area AppKit copies from.
+    private func promise(for entry: RemoteEntry) -> NSItemProvider {
+        SFTPFilePromise.provider(for: entry, session: session)
     }
 
     private func accessibilityText(_ entry: RemoteEntry) -> String {
@@ -848,6 +888,8 @@ struct SFTPWindowView: View {
         Button(many ? "Delete \(targets.count) Items…" : "Delete…", role: .destructive) {
             confirmDelete(targets)
         }
+        Button("Show Info") { showInfo(entry) }
+            .disabled(many)
         Button(many ? "Permissions for \(targets.count) Items…" : "Permissions…") {
             if many {
                 permissionsRequest = PermissionsRequest(entries: targets)
@@ -1006,6 +1048,68 @@ struct SFTPWindowView: View {
             return
         }
         batchSheet = .summary(outcome)
+    }
+
+    /// Get Info: the server's own `stat` values, not the listing's snapshot — a
+    /// sheet that quotes a permissions value the row has since outgrown is worse
+    /// than no sheet. `info()` fills this in a moment after it opens.
+    private func infoSheet(_ entry: RemoteEntry, _ attributes: SFTPAttributes?) -> some View {
+        let values = attributes ?? entry.attributes
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(nsImage: FileIcon.image(for: entry, size: 32))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.name)
+                        .font(.headline)
+                        .textSelection(.enabled)
+                    Text(entry.path)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+            Divider()
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 6) {
+                infoRow("Kind", infoKind(entry))
+                infoRow("Size", ByteFormatter.string(values.size))
+                infoRow("Permissions", "\\(PermissionFormatter.string(values.permissions))  \\(PermissionSet(modeBits: UInt16((values.permissions ?? 0) & 0o7777)).octal)")
+                infoRow("Owner", values.uid.map(String.init) ?? "—")
+                infoRow("Group", values.gid.map(String.init) ?? "—")
+                infoRow("Modified", values.modified.map { DateFormatter.short.string(from: $0) } ?? "—")
+                infoRow("Accessed", values.accessed.map { DateFormatter.short.string(from: $0) } ?? "—")
+            }
+            .font(.callout)
+            HStack {
+                Button("Permissions…") {
+                    infoEntry = nil
+                    permissionsTarget = entry
+                }
+                .disabled(entry.isSymlink)
+                Spacer()
+                Button("OK") { infoEntry = nil }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(width: 420)
+    }
+
+    @ViewBuilder
+    private func infoRow(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .gridColumnAlignment(.trailing)
+            Text(value)
+                .font(.system(.callout, design: .monospaced))
+                .textSelection(.enabled)
+        }
+    }
+
+    private func infoKind(_ entry: RemoteEntry) -> String {
+        if entry.isSymlink { return "Symbolic link" }
+        return entry.isDirectory ? "Folder" : "File"
     }
 
     @ViewBuilder

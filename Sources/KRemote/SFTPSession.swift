@@ -423,6 +423,21 @@ final class SFTPSession: Identifiable {
 
     // MARK: - Transfers
 
+    /// Downloads one entry straight to an exact local URL, outside the queue's
+    /// conflict logic.
+    ///
+    /// A drag promise names its own destination (the drop target chose it), so
+    /// there is nothing to ask the user and no batch to report. Failures propagate
+    /// to AppKit, which shows the drop as failed.
+    func downloadDirect(_ entry: RemoteEntry, to localURL: URL) async throws {
+        let client = self.client
+        if entry.isDirectory {
+            try await client.downloadTree(entry.path, to: localURL)
+        } else {
+            try await client.downloadFile(entry.path, to: localURL)
+        }
+    }
+
     /// Queues downloads with already-resolved destinations.
     ///
     /// The window resolves conflicts (Replace / Keep Both / Skip) *before* this

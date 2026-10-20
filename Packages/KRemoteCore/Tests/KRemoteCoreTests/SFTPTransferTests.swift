@@ -209,6 +209,55 @@ final class SFTPTransferTests: XCTestCase {
         // Nothing but the handshake was written.
         XCTAssertEqual(transport.requestType(at: 1), nil)
     }
+
+    // MARK: - Recursive count
+
+    /// The delete confirmation derives its "it contains N items" from this number
+    /// by subtracting the folder itself. A folder holding two files must therefore
+    /// report 3 — the number `removeRecursively` removes — not 2.
+    func testCountItemsIncludesTheFolderItself() async throws {
+        let transport = FakeSFTPTransport()
+
+        // The root is the first thing stat'd and is a directory; the children
+        // after it are plain files, so the walk stops at depth one.
+        let stats = Counter()
+        let listings = Counter()
+        transport.onRequest = { packet in
+            let id = FakeServer.id(of: packet)
+            switch FakeServer.type(of: packet) {
+            case .initPacket:
+                return [FakeServer.version()]
+            case .stat, .lstat:
+                let isRoot = stats.increment() == 1
+                return [FakeServer.attrs(id, SFTPAttributes(
+                    permissions: isRoot ? 0o040755 : 0o100644
+                ))]
+            case .opendir:
+                return [FakeServer.handle(id)]
+            case .readdir:
+                if listings.increment() == 1 {
+                    return [FakeServer.names(id, [
+                        ("a.txt", SFTPAttributes(size: 1, permissions: 0o100644)),
+                        ("b.txt", SFTPAttributes(size: 1, permissions: 0o100644)),
+                    ])]
+                }
+                return [FakeServer.status(id, .eof)]
+            default:
+                return [FakeServer.status(id, .ok)]
+            }
+        }
+
+        let client = try await connectedClient(transport)
+        let count = try await client.countItems(in: "/srv/tree")
+        XCTAssertEqual(count, 3, "the folder itself must be included")
+    }
+}
+
+/// A counter the scripted transport can bump from its own queue.
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func increment() -> Int { lock.withLock { value += 1; return value } }
 }
 
 /// Collects progress ticks from a `@Sendable` closure.

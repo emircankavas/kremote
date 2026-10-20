@@ -272,9 +272,15 @@ extension SFTPClient {
     }
 
     /// How many entries a delete would remove, for the confirmation text.
-    /// Directories count themselves, so deleting a folder with 3 files says 4.
+    /// Directories count themselves, so deleting a folder with 3 files says 4 —
+    /// deliberately the same number `removeRecursively` reports, because the
+    /// confirmation's "it contains N items" is derived from it by subtracting the
+    /// folder itself.
     public func countItems(in path: String) async throws -> Int {
-        (try await walk(path)).count
+        let target = Self.normalise(path)
+        let attributes = try await stat(target, followSymlinks: false)
+        guard attributes.isDirectory, !attributes.isSymlink else { return 1 }
+        return try await walk(target).count + 1
     }
 
     /// Deletes a file, a symlink, or a whole directory tree.
