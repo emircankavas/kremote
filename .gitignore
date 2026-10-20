@@ -34,3 +34,6 @@ Package.resolved
 
 # Worker scratch (transient)
 .scratch/
+
+# Local scratch used while probing behaviour, never part of the app.
+scratch/
