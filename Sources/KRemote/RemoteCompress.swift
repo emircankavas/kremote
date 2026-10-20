@@ -93,21 +93,24 @@ enum RemoteCompress {
         do {
             // Unprivileged first: most selections are readable, and sudo is a
             // second login that should not be paid for when it is not needed.
-            var output: RemoteShell.Output
-            do {
-                output = try await stream(
-                    shell: shell,
-                    elevated: false,
-                    entries: entries,
-                    handle: handle,
-                    counter: counter,
-                    progress: progress,
-                    isCancelled: isCancelled
-                )
-            } catch {
-                // Only a refusal is worth retrying as root: a timeout or a broken
-                // pipe fails the same way and would just cost another login.
-                guard Self.isPermissionDenied(error) else { throw error }
+            //
+            // tar's failure is *not* an exception: the script writes the reason to
+            // stderr and exits 0 as far as this channel can see, so the refusal has
+            // to be recognised in the output. That is what the check below is for.
+            var output = try await stream(
+                shell: shell,
+                elevated: false,
+                entries: entries,
+                handle: handle,
+                counter: counter,
+                progress: progress,
+                isCancelled: isCancelled
+            )
+
+            // Only a refusal is worth retrying as root: a timeout or a broken pipe
+            // fails the same way and would just cost another login.
+            if Self.outputShowsPermissionDenial(output) {
+                resetDownload(handle: handle, part: part, counter: counter)
                 output = try await stream(
                     shell: shell,
                     elevated: true,
@@ -134,6 +137,15 @@ enum RemoteCompress {
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.hasPrefix("/") }
                     .joined(separator: " ")
+                // A refusal that survived the elevated retry means sudo itself did
+                // not work (wrong password, no sudoers entry, `requiretty`). Say so
+                // instead of repeating tar, which reads as "the feature is broken".
+                if Self.outputShowsPermissionDenial(output) {
+                    throw Failure.archiveFailed(
+                        (detail.isEmpty ? "Permission denied." : detail)
+                            + " The sudo retry did not help: check the saved password and that this user may run sudo without a terminal."
+                    )
+                }
                 throw Failure.archiveFailed(detail)
             }
 
@@ -179,14 +191,25 @@ enum RemoteCompress {
             : try await shell.run(command, timeout: 3600, consume: consume)
     }
 
-    /// True when the failure is the server refusing to read a path, which is the
-    /// only case elevation can fix.
-    static func isPermissionDenied(_ error: Error) -> Bool {
-        let text = ((error as? LocalizedError)?.errorDescription ?? String(describing: error))
-            .lowercased()
+    /// True when tar refused to read a path.
+    ///
+    /// Checked on the output rather than on a thrown error: tar reports the
+    /// refusal and exits, and the channel only sees a closed stream, so a retry
+    /// hung off `catch` would never run.
+    static func outputShowsPermissionDenial(_ output: RemoteShell.Output) -> Bool {
+        let text = output.stderr.lowercased()
         return text.contains("permission denied")
             || text.contains("cannot stat")
             || text.contains("cannot open")
+    }
+
+    /// Empties the partial file before the elevated attempt rewrites it, so two
+    /// archives are never appended into one.
+    private static func resetDownload(handle: FileHandle, part: URL, counter: ReceivedCounter) {
+        try? handle.truncate(atOffset: 0)
+        try? handle.seek(toOffset: 0)
+        counter.reset()
+        _ = part
     }
 
     /// A name for the archive: the single item's, or a dated "Selection".
@@ -216,4 +239,6 @@ final class ReceivedCounter: @unchecked Sendable {
             return total
         }
     }
+
+    func reset() { lock.withLock { total = 0 } }
 }
