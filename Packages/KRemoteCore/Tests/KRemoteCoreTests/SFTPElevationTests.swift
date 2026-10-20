@@ -322,6 +322,7 @@ final class SFTPElevationTests: XCTestCase {
             ElevationFailureKind.classify(stderr: "sudo: a terminal is required to read the password"),
             .terminalRequired
         )
+
         XCTAssertEqual(
             ElevationFailureKind.classify(
                 stderr: "sftp-server: no sftp-server binary found (checked /usr/libexec, /usr/lib/openssh, PATH, sshd_config)"
@@ -340,6 +341,22 @@ final class SFTPElevationTests: XCTestCase {
         XCTAssertEqual(ElevationFailureKind.classify(stderr: "something new"), .unknown)
         XCTAssertEqual(ElevationFailureKind.classify(stderr: ""), .unknown)
     }
+
+    /// A successful sudo is silent, but the command it launches is not: `tar`
+    /// writes "Removing leading `/' from member names" immediately. Treating any
+    /// stderr as a refusal killed the channel mid-archive, which reached the user
+    /// as "Elevating with sudo failed" even though sudo had worked.
+    func testTarWarningIsNotMistakenForAnElevationFailure() {
+        XCTAssertEqual(
+            ElevationFailureKind.classify(stderr: "tar: Removing leading `/' from member names"),
+            .unknown
+        )
+        XCTAssertEqual(
+            ElevationFailureKind.classify(stderr: "/tmp/kremote.1L8XIz"),
+            .unknown
+        )
+    }
+
 
     func testNotPermittedAndMissingBinaryAreDistinctAlerts() {
         let notPermitted = ElevationFailure(stderr: "u is not in the sudoers file.")
