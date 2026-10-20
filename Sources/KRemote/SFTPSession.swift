@@ -67,6 +67,24 @@ final class SFTPSession: Identifiable {
     /// Called only from this (main-actor) object, so it is not `@Sendable`: the
     /// builder reads credentials and the sudo flag from `AppModel`.
     private let makeClient: () -> SFTPClient
+    /// The live client. Exposed so "Compress and download" can reuse the download
+    /// path — a second connection would re-authenticate and could see a different
+    /// tree if the server is being written to.
+    var sftpClient: SFTPClient { client }
+
+    /// Opens a shell channel on the same server, for work SFTP v3 cannot ask for
+    /// (compressing a selection into one archive). A second ssh connection, not a
+    /// second SFTP session: the subsystem has no way to run a program.
+    func makeShell() -> RemoteShell {
+        RemoteShell(
+            host: connection.host,
+            port: connection.port,
+            username: connection.username,
+            identityFile: connection.identityFile,
+            password: connection.password
+        )
+    }
+
     private var client: SFTPClient
 
     /// Navigation history for ⌘[ / ⌘].
@@ -78,15 +96,28 @@ final class SFTPSession: Identifiable {
     private var loadToken = 0
     private var homePath = "~"
 
+    /// The SSH settings, kept so a shell channel can be opened on demand.
+    struct Connection: Sendable {
+        let host: String
+        let port: Int
+        let username: String
+        let identityFile: String
+        let password: String
+    }
+
+    private let connection: Connection
+
     init(
         nodeID: ConnectionNode.ID,
         title: String,
         target: String,
+        connection: Connection,
         makeClient: @escaping () -> SFTPClient
     ) {
         self.nodeID = nodeID
         self.title = title
         self.target = target
+        self.connection = connection
         self.makeClient = makeClient
         self.client = makeClient()
     }

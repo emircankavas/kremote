@@ -608,6 +608,13 @@ final class AppModel {
             nodeID: nodeID,
             title: node.name,
             target: "sftp://\(user)\(effective.host):\(effective.port)",
+            connection: SFTPSession.Connection(
+                host: effective.host,
+                port: effective.port,
+                username: effective.username,
+                identityFile: effective.identityFile,
+                password: effective.password
+            ),
             makeClient: makeClient
         )
         sftpSessions.append(session)

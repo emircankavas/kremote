@@ -72,6 +72,8 @@ struct SFTPWindowView: View {
     @State private var deleteItemCount: Int?
     @State private var isDeletePresented = false
     @State private var permissionsTarget: RemoteEntry?
+    /// Set while a compressed download is being assembled.
+    @State private var compressProgress: CompressProgress?
     /// The permissions sheet for a whole selection (nil when it is one row).
     @State private var permissionsRequest: PermissionsRequest?
     /// A download batch waiting on the conflict answer, plus its conflict-free part.
@@ -391,6 +393,9 @@ struct SFTPWindowView: View {
     @ViewBuilder
     private var content: some View {
         VStack(spacing: 0) {
+            if let progress = compressProgress {
+                CompressProgressBanner(progress: progress)
+            }
             if let message = session.errorMessage, !rows.isEmpty {
                 errorBanner(message)
             }
@@ -881,6 +886,9 @@ struct SFTPWindowView: View {
             Button("Open") { open(entry) }
         }
         Button(many ? "Download \(targets.count) Items…" : "Download…") { download(targets) }
+        Button(many ? "Compress and Download \(targets.count) Items…" : "Compress and Download…") {
+            compressAndDownload(targets)
+        }
         Divider()
         Button("Rename…") { beginRename(entry) }
             .disabled(many)
@@ -912,6 +920,47 @@ struct SFTPWindowView: View {
     ///
     /// One file gets a save panel; a folder tree or several items get a
     /// destination folder. An existing local name is never silently overwritten.
+    /// Compresses the selection on the server and streams the archive down.
+    ///
+    /// Server-side on purpose: only the compressed bytes cross the network, and
+    /// nothing is written to this Mac's disk but the final file.
+    private func compressAndDownload(_ entries: [RemoteEntry]) {
+        guard !entries.isEmpty else { return }
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = RemoteCompress.suggestedName(for: entries)
+        panel.canCreateDirectories = true
+        panel.title = entries.count == 1
+            ? "Compress and Download \(entries[0].name)"
+            : "Compress and Download \(entries.count) Items"
+        panel.prompt = "Download"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+
+        compressProgress = CompressProgress(name: destination.lastPathComponent, bytes: 0)
+        let shell = session.makeShell()
+        Task {
+            do {
+                try await RemoteCompress.run(
+                    entries: entries,
+                    shell: shell,
+                    destination: destination,
+                    progress: { received, _ in
+                        Task { @MainActor in
+                            compressProgress?.bytes = received
+                        }
+                    }
+                )
+                await MainActor.run { compressProgress = nil }
+            } catch {
+                await MainActor.run {
+                    compressProgress = nil
+                    session.errorMessage = (error as? LocalizedError)?.errorDescription
+                        ?? String(describing: error)
+                }
+            }
+        }
+    }
+
     private func download(_ explicit: [RemoteEntry]?) {
         let entries = explicit ?? selectedEntries
         guard !entries.isEmpty else { return }
