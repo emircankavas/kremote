@@ -3,24 +3,32 @@ import KRemoteCore
 
 /// Live CPU and memory for a session, shown in its status bar.
 ///
-/// Bridges `MetricsSampler` (a core actor, no UI framework) to SwiftUI: the view
-/// asks for a sample every five seconds while it is on screen, and stops when it
-/// goes away so a closed tab leaves no ssh process behind.
+/// Two ways in, because the two protocols are different:
 ///
-/// SSH samples the box over a separate command channel; RDP samples it over ssh
-/// to the same host, because RDP itself carries a desktop, not counters.
+/// - **SSH** samples over a separate command channel (`MetricsSampler`), leaving the
+///   interactive terminal alone.
+/// - **RDP** carries a desktop, not counters, so a Windows host is asked over WinRM.
+///   When WinRM is not enabled — a normal setup, since RDP does not need it — the
+///   badge shows nothing at all. An error there would read as a fault in KRemote
+///   for a machine that is simply not configured for it.
+///
+/// Polling stops when the pane goes away, so a closed tab leaves no traffic behind.
 struct MetricsBadge: View {
-    let host: String
-    let port: Int
-    let username: String
-    let identityFile: String
-    let password: String
+    enum Source {
+        /// A Unix host: sample over ssh.
+        case shell(host: String, port: Int, username: String, identityFile: String, password: String)
+        /// A Windows host: sample over WinRM.
+        case winrm(host: String, username: String, password: String)
+    }
+
+    let source: Source
     /// Shown only when the connection is live: polling a dead server is noise.
     let isActive: Bool
 
     @State private var metrics: SystemMetrics?
     @State private var failure: String?
     @State private var sampler: MetricsSampler?
+    @State private var polling: Task<Void, Never>?
     @State private var showDetail = false
 
     var body: some View {
@@ -39,14 +47,15 @@ struct MetricsBadge: View {
                 .popover(isPresented: $showDetail, arrowEdge: .bottom) {
                     detailPopover(metrics)
                 }
-            } else if failure != nil {
-                // A closed eye rather than a red error: the session itself is fine,
-                // only the figures are missing, and the reason is one click away.
+            } else if let failure, case .shell = source {
+                // Only an SSH host reports its own failure: the session works, the
+                // figures do not, and the reason is one hover away.
                 Image(systemName: "chart.bar.xaxis")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
-                    .help(failure ?? "")
+                    .help(failure)
             }
+            // A WinRM failure draws nothing: "WinRM is off" is not a KRemote problem.
         }
         .onAppear { sync() }
         .onDisappear { stop() }
@@ -83,11 +92,18 @@ struct MetricsBadge: View {
             if let load = metrics.loadDetail { row("Load", load) }
             if let swap = metrics.swapDetail { row("Swap", swap) }
             if let uptime = metrics.uptimeDetail { row("Uptime", uptime) }
-            Text(host)
+            Text(hostLabel)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
         .padding(12)
+    }
+
+    private var hostLabel: String {
+        switch source {
+        case .shell(let host, _, _, _, _): return host
+        case .winrm(let host, _, _): return "\(host) · WinRM"
+        }
     }
 
     private func row(_ label: String, _ value: String) -> some View {
@@ -104,44 +120,66 @@ struct MetricsBadge: View {
     // MARK: - Lifecycle
 
     private func sync() {
-        if isActive {
-            startIfNeeded()
-        } else {
-            stop()
-        }
+        if isActive { startIfNeeded() } else { stop() }
     }
 
     private func startIfNeeded() {
-        guard sampler == nil, !host.isEmpty else { return }
-        // One shared authenticated connection for every sample, so a password-only
-        // server is not asked for a password every five seconds.
-        let controlPath = RemoteShell.controlPath(
-            for: host,
-            port: port,
-            username: username,
-            in: MetricsPaths.controlDirectory()
-        )
-        let shell = RemoteShell(
-            host: host,
-            port: port,
-            username: username,
-            identityFile: identityFile,
-            password: password,
-            controlPath: controlPath
-        )
-        let sampler = MetricsSampler(shell: shell)
-        self.sampler = sampler
-        Task {
-            await sampler.start { state in
-                Task { @MainActor in apply(state) }
+        guard sampler == nil, polling == nil else { return }
+        switch source {
+        case .shell(let host, let port, let username, let identityFile, let password):
+            guard !host.isEmpty else { return }
+            // One shared authenticated connection for every sample, so a
+            // password-only server is not asked for a password every five seconds.
+            let controlPath = RemoteShell.controlPath(
+                for: host, port: port, username: username,
+                in: MetricsPaths.controlDirectory()
+            )
+            let shell = RemoteShell(
+                host: host, port: port, username: username,
+                identityFile: identityFile, password: password,
+                controlPath: controlPath
+            )
+            let sampler = MetricsSampler(shell: shell)
+            self.sampler = sampler
+            Task {
+                await sampler.start { state in
+                    Task { @MainActor in apply(state) }
+                }
+            }
+
+        case .winrm(let host, let username, let password):
+            guard !host.isEmpty, !username.isEmpty else { return }
+            polling = Task {
+                while !Task.isCancelled {
+                    do {
+                        let sample = try await WinRMMetricsProbe.sample(
+                            host: host, username: username, password: password)
+                        await MainActor.run {
+                            metrics = sample
+                            failure = nil
+                        }
+                    } catch {
+                        // WinRM off, credentials wrong, firewall closed — all of
+                        // them mean "no figures", never an error in the bar.
+                        await MainActor.run {
+                            metrics = nil
+                            failure = error.localizedDescription
+                        }
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                }
             }
         }
     }
 
     private func stop() {
-        guard let sampler else { return }
-        self.sampler = nil
-        Task { await sampler.stop() }
+        if let sampler {
+            self.sampler = nil
+            Task { await sampler.stop() }
+        }
+        polling?.cancel()
+        polling = nil
     }
 
     @MainActor

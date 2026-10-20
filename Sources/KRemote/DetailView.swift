@@ -355,11 +355,13 @@ private struct SessionContent: View {
             // previous server's numbers.
             if isConnected {
                 MetricsBadge(
-                    host: model.effective(session.nodeID)?.host ?? "",
-                    port: model.effective(session.nodeID)?.port ?? 22,
-                    username: model.effective(session.nodeID)?.username ?? "",
-                    identityFile: model.effective(session.nodeID)?.identityFile ?? "",
-                    password: model.effective(session.nodeID)?.password ?? "",
+                    source: .shell(
+                        host: model.effective(session.nodeID)?.host ?? "",
+                        port: model.effective(session.nodeID)?.port ?? 22,
+                        username: model.effective(session.nodeID)?.username ?? "",
+                        identityFile: model.effective(session.nodeID)?.identityFile ?? "",
+                        password: model.effective(session.nodeID)?.password ?? ""
+                    ),
                     isActive: true
                 )
                 .id(session.nodeID)
@@ -591,12 +593,14 @@ private struct RDPSessionContent: View {
             // ssh channel to the same host. When the host has no ssh (a plain
             // Windows box), the badge stays silent rather than showing an error.
             if isRDPConnected {
+                // RDP cannot report counters, so this is WinRM. If WinRM is off the
+                // badge draws nothing — see MetricsBadge.
                 MetricsBadge(
-                    host: model.effective(nodeID)?.host ?? "",
-                    port: 22,
-                    username: model.effective(nodeID)?.username ?? "",
-                    identityFile: model.effective(nodeID)?.identityFile ?? "",
-                    password: model.effective(nodeID)?.password ?? "",
+                    source: .winrm(
+                        host: model.effective(nodeID)?.host ?? "",
+                        username: model.effective(nodeID)?.username ?? "",
+                        password: model.effective(nodeID)?.password ?? ""
+                    ),
                     isActive: true
                 )
                 .id(nodeID)
