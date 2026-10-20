@@ -49,6 +49,16 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
 
+### New: drag out, Get Info, and ⌘⌫
+
+- **Drag a row onto the Desktop or Finder** to download it. The drag carries the
+  file promise, so the copy starts as soon as you drop it.
+- **Get Info** (⌘I) shows size, permissions, owner/group and dates for the
+  selection.
+- **⌘⌫ deletes** the selection, with one confirmation naming the items and, for
+  folders, how many things are inside.
+- One selection model across both views: ⌘-click toggles, ⇧-click extends.
+
 ### Fixed: sudo could not find sftp-server
 
 beta 11 invented an `sshd -i -s sftp` invocation to reach the built-in SFTP
@@ -201,7 +211,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.12 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.13 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not
