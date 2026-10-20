@@ -436,10 +436,12 @@ public final class SudoSFTPTransport: SFTPTransport, @unchecked Sendable {
 
                 // Before the subsystem has said anything, a complaint on stderr
                 // is sudo refusing us: fail now with the classification instead
-                // of sitting out the whole response deadline.
+                // of sitting out the whole response deadline. Only a *recognised*
+                // refusal counts — an elevated channel may be running an ordinary
+                // command (the archive) whose warnings are not failures.
                 if !sawAnyByte {
                     let text = process.stderrText().trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !text.isEmpty {
+                    if !text.isEmpty, ElevationFailureKind.classify(stderr: text) != .unknown {
                         closed = true
                         condition.broadcast()
                         throw SFTPError.elevationFailed(ElevationFailure(stderr: text))
@@ -450,9 +452,9 @@ public final class SudoSFTPTransport: SFTPTransport, @unchecked Sendable {
                     closed = true
                     condition.broadcast()
                     // Classify whatever sudo did say, so a refusal is not dressed
-                    // up as a timeout.
+                    // up as a timeout — but a command's own output is not a refusal.
                     let text = process.stderrText().trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !text.isEmpty {
+                    if !text.isEmpty, ElevationFailureKind.classify(stderr: text) != .unknown {
                         throw SFTPError.elevationFailed(ElevationFailure(stderr: text))
                     }
                     throw SFTPError.elevationFailed(
@@ -481,13 +483,17 @@ public final class SudoSFTPTransport: SFTPTransport, @unchecked Sendable {
             while self.condition.withLock({ !self.closed }) {
                 do {
                     guard let chunk = try self.process.read(maxLength: 64 * 1024) else {
-                        // EOF: prefer sudo's own words over a bare "connection
-                        // closed" — that is the alert the user needs.
+                        // EOF. A refusal that arrives as the channel dies is worth
+                        // surfacing with sudo's own words; ordinary command output
+                        // is not — the archive's `tar` warnings reached the user as
+                        // "Elevating with sudo failed" on every single attempt.
                         let text = self.process.stderrText()
                             .trimmingCharacters(in: .whitespacesAndNewlines)
-                        self.finish(error: text.isEmpty
-                            ? nil
-                            : SFTPError.elevationFailed(ElevationFailure(stderr: text)))
+                        let refused = !text.isEmpty
+                            && ElevationFailureKind.classify(stderr: text) != .unknown
+                        self.finish(error: refused
+                            ? SFTPError.elevationFailed(ElevationFailure(stderr: text))
+                            : nil)
                         return
                     }
                     self.condition.withLock {
@@ -635,7 +641,21 @@ public final class SudoElevationProvider: ElevationProvider, @unchecked Sendable
         }
         let line = Data((stored + "\n").utf8)
         let remote = "sudo -S -p '' /bin/sh -c " + ShellQuote.single(command)
-        return factory(remote, line)
+        // Deliberately not `factory`: that path wraps the channel in
+        // `SudoSFTPTransport`, which is built for a subsystem and reads any line on
+        // stderr as sudo's refusal. A command writes its own diagnostics there, so
+        // it gets a plain channel where stderr is only diagnostics.
+        return SudoCommandTransport(
+            process: ProcessSFTPTransport(
+                host: target.host,
+                port: target.port,
+                username: target.username,
+                identityFile: target.identityFile,
+                password: String(decoding: line.dropLast(), as: UTF8.self),
+                remoteCommand: remote
+            ),
+            passwordLine: line
+        )
     }
 
     /// Answered without exposing the secret: the flag and whether a usable
