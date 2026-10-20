@@ -77,11 +77,13 @@ extension ElevationFailureKind {
             || text.contains("sftp-server: command not found") {
             return .sftpServerMissing
         }
+        // Deliberately narrow. A bare "try again" also appears in ordinary command
+        // output, and this classifier now runs against a command's stderr while the
+        // command is still working — a false positive tears down a healthy channel.
         if text.contains("sorry, try again")
             || text.contains("incorrect password")
-            || text.contains("authentication failed")
-            || text.contains("try again")
-            || text.contains("a password is required")
+            || text.contains("sudo: authentication failed")
+            || text.contains("sudo: a password is required")
             || text.contains("no password was provided") {
             return .passwordRejected
         }
@@ -370,12 +372,15 @@ public final class SudoSFTPTransport: SFTPTransport, @unchecked Sendable {
             throw SFTPError.elevationFailed(ElevationFailure(kind: .connectionFailed, stderr: reason))
         }
 
-        // Watch briefly for sudo complaining. A successful sudo is silent, so
-        // anything on stderr in this window is a refusal; a dead child is one too.
+        // Watch briefly for sudo complaining. A *successful* sudo is silent, but
+        // the command it starts is not: `tar` writes warnings like
+        // "Removing leading `/' from member names" immediately, and treating any
+        // stderr as a refusal tore the channel down mid-archive. Only text the
+        // classifier recognises as a sudo refusal — or a dead child — counts.
         let deadline = Date().addingTimeInterval(timeouts.settle)
         while Date() < deadline {
             let text = process.stderrText().trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty {
+            if !text.isEmpty, ElevationFailureKind.classify(stderr: text) != .unknown {
                 close()
                 throw SFTPError.elevationFailed(ElevationFailure(stderr: text))
             }
