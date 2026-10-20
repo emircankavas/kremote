@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 14
+## KRemote 1.8.0 beta 15
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -48,6 +48,18 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### New: Compress and Download
+
+Right-click a selection → **Compress and Download** builds a `.tar.gz` **on the
+server** and downloads the archive. The compressed bytes are what cross the
+network — downloading the files first and compressing locally would move the
+uncompressed data and need a temporary copy on the Mac.
+
+The archive is written to a private temporary directory on the server and is
+deleted immediately after it has been sent, on failure, and if the transfer is
+cut. Remote paths are single-quoted, so a filename containing `;`, quotes or `$`
+is treated as a name and never as shell syntax.
 
 ### Fixed: selecting more than one file
 
@@ -219,7 +231,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.14 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.15 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not
