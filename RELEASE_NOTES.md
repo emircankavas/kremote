@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 24
+## KRemote 1.8.0 beta 25
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -48,6 +48,18 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### Fixed: the reason was unreachable
+
+The badge showed nothing at all when WinRM could not answer, so there was nothing
+to click and no way to find out why. It now shows `–` where the figures would be —
+clickable, and opening the reason plus the two commands that fix it. No number is
+invented: the placeholders are visibly empty.
+
+Polling also continues after a failure, on a slower 30-second cadence, so enabling
+WinRM during a session brings the figures to life instead of requiring the tab to be
+reopened. A connection with no username says so rather than polling an account the
+server would reject.
 
 ### Fixed: a refused WinRM port now says so
 
@@ -355,7 +367,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.24 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.25 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not
