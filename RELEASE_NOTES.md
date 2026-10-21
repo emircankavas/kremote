@@ -1,8 +1,26 @@
-## KRemote 1.9.0 beta 4
+## KRemote 1.9.0 beta 5
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
 `confCons.xml` import.
+
+### New: connect straight from the search field
+
+Type a host into **Search connections** and the results offer *Connect to "…"*. The
+chevron next to it picks SSH or RDP; clicking the row connects over SSH, which is the
+common case.
+
+`host`, `host:port`, `user@host` and `user@host:port` are all understood, plus bracketed
+IPv6. A port you typed wins over the protocol's default; without one, SSH uses 22 and RDP
+uses 3389.
+
+The connection is a **session, not a saved favourite**: it does not appear in the sidebar
+and is not written to the tree. A host you reach this way repeatedly is one worth adding
+properly, and a sidebar that fills with one-off addresses is the thing people complain
+about. Credentials are read from the password store if this host has been used before.
+
+A query that cannot be a host — a sentence, something with a `/`, an out-of-range port —
+is still just a search, so the row never appears for something that was never an address.
 
 ### New: edit remote files in place
 

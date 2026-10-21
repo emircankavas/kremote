@@ -60,6 +60,45 @@ struct SidebarView: View {
         .frame(height: 28)
     }
 
+    /// "Connect to <what you typed>", with the protocol chosen from its own menu.
+    ///
+    /// A row rather than a button so it sits in the results list where the eye already
+    /// is, and a menu rather than a second dialog so the choice of protocol is one click
+    /// away from the decision to connect.
+    @ViewBuilder
+    private func adHocRow(_ target: AdHocTarget) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "plus.circle")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Connect to “\(target.displayLabel)”")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(target.username.isEmpty
+                     ? "Not in the tree"
+                     : "as \(target.username)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Menu {
+                Button("SSH") { model.connectAdHoc(target, protocol: .ssh) }
+                Button("RDP") { model.connectAdHoc(target, protocol: .rdp) }
+            } label: {
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Choose SSH or RDP")
+        }
+        .contentShape(Rectangle())
+        // The whole row opens SSH: it is the common case, and requiring a menu for the
+        // default would be a click for nothing. The chevron picks the other protocol.
+        .onTapGesture { model.connectAdHoc(target, protocol: .ssh) }
+    }
+
     // MARK: - Tree / results
 
     @ViewBuilder
@@ -68,7 +107,12 @@ struct SidebarView: View {
 
         if model.isSearching {
             let results = model.searchResults
-            if results.isEmpty {
+            // What was typed, if it could be a host. Offered whether or not the search
+            // matched something: a user typing an address that merely *looks* like a
+            // saved connection's name should still be able to reach it directly.
+            let adHoc = AdHocTarget.parse(model.searchQuery)
+
+            if results.isEmpty, adHoc == nil {
                 Text("No matches")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -79,6 +123,9 @@ struct SidebarView: View {
                         NodeRow(node: node, showsPath: true)
                             .tag(node.id)
                             .contextMenu { menu(for: node) }
+                    }
+                    if let adHoc {
+                        adHocRow(adHoc)
                     }
                 }
                 .listStyle(.sidebar)

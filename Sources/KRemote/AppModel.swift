@@ -388,12 +388,14 @@ final class AppModel {
     }
 
     func find(_ id: ConnectionNode.ID) -> ConnectionNode? {
-        ConnectionNode.find(id, in: roots)
+        ConnectionNode.find(id, in: roots) ?? adHocNodes[id]
     }
 
     /// Settings of a node with folders' values folded in.
     func effective(_ id: ConnectionNode.ID) -> EffectiveConnection? {
-        ConnectionNode.effective(for: id, in: roots)
+        if let found = ConnectionNode.effective(for: id, in: roots) { return found }
+        // An ad-hoc node has no parent folders, so its own values are the effective ones.
+        return adHocNodes[id]?.effective(inheriting: nil)
     }
 
     /// Search results for the sidebar filter; empty query means "not filtering".
@@ -643,6 +645,57 @@ final class AppModel {
         focusedTile = tiles.isEmpty ? 0 : min(max(focusedTile, 0), tiles.count - 1)
     }
 
+    /// Hosts connected to ad hoc, by id.
+    ///
+    /// Kept outside `roots` on purpose: they are sessions, not saved favourites, so they
+    /// are not persisted and never appear in the sidebar. `find` and `effective` consult
+    /// this map as a second source, which is all the tab, the SFTP window and the metrics
+    /// badge ever need.
+    private(set) var adHocNodes: [ConnectionNode.ID: ConnectionNode] = [:]
+
+    /// Opens a session for a host that is not in the tree.
+    ///
+    /// A node is built and remembered, but **not** inserted into `roots`: quietly growing
+    /// the sidebar with one-off hosts is the behaviour people resent. The session, SFTP
+    /// and the metrics badge only need a `ConnectionNode`, so nothing downstream has to
+    /// know the difference.
+    func connectAdHoc(_ target: AdHocTarget, protocol protocolName: RemoteProtocol) {
+        let node = AdHocConnection.makeNode(for: target, protocol: protocolName)
+        // Same host and protocol already open: focus that tab instead of a duplicate.
+        if let existing = adHocNodes.values.first(where: {
+            $0.host == node.host && $0.port == node.port && $0.protocolName == node.protocolName
+        }), let openSession = sessions.first(where: { $0.nodeID == existing.id }) {
+            activeSessionID = openSession.id
+            focusTiledSession(openSession.id)
+            searchQuery = ""
+            return
+        }
+
+        adHocNodes[node.id] = node
+        // A host reached this way before may have a stored password under the same id;
+        // `hydrateCredentials` reads it lazily, which is why it is called here rather
+        // than at launch.
+        hydrateCredentials(for: node.id)
+        let session = Session(nodeID: node.id, title: node.name)
+        sessions.append(session)
+        activeSessionID = session.id
+        if splitMode {
+            PaneTiling.place(session: session.id, in: &tiles, focusedTile: focusedTile)
+            focusedTile = PaneTiling.tile(of: session.id, in: tiles) ?? focusedTile
+        } else {
+            tiles = [session.id]
+        }
+        searchQuery = ""
+    }
+
+    /// Drops the ad-hoc node when its last tab closes, so the map cannot grow for the
+    /// life of the process.
+    private func forgetAdHocIfUnused(_ nodeID: ConnectionNode.ID) {
+        guard adHocNodes[nodeID] != nil else { return }
+        guard !sessions.contains(where: { $0.nodeID == nodeID }) else { return }
+        adHocNodes.removeValue(forKey: nodeID)
+    }
+
     /// Opens a session for a connection leaf. When `newTab` is false and the
     /// connection already has a tab, that tab is focused instead.
     func open(_ node: ConnectionNode, newTab: Bool = false) {
@@ -708,6 +761,7 @@ final class AppModel {
 
     func closeSession(_ id: Session.ID) {
         guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
+        let closingNodeID = sessions[index].nodeID
         let wasActiveTile = splitMode ? tiles.indices.contains(focusedTile) && tiles[focusedTile] == id : true
         sessions.remove(at: index)
         if activeSessionID == id {
@@ -715,6 +769,7 @@ final class AppModel {
             activeSessionID = sessions.isEmpty ? nil : sessions[next].id
         }
         reconcileTiles()
+        forgetAdHocIfUnused(closingNodeID)
         // If the closed session was the focused pane, focus whatever took its place.
         if wasActiveTile, let active = activeSessionID, splitMode {
             focusedTile = PaneTiling.tile(of: active, in: tiles) ?? focusedTile
