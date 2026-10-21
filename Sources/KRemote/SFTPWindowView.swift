@@ -897,7 +897,12 @@ struct SFTPWindowView: View {
         ]
         let lower = name.lowercased()
         if lower == "dockerfile" || lower == "makefile" || lower == ".env" { return true }
-        guard let dot = lower.lastIndex(of: ".") else { return false }
+        // No extension at all — the majority of the interesting files on a Linux box
+        // (`hosts`, `fstab`, `nginx.conf` symlinks, a user's own `test` file) — is text
+        // far more often than not, so a double-click opens the editor. The editor
+        // refuses binary content itself, which is the real guard; this list only
+        // decides which of the two actions a double-click means.
+        guard let dot = lower.lastIndex(of: ".") else { return true }
         let ext = String(lower[lower.index(after: dot)...])
         return editable.contains(ext)
     }
@@ -929,8 +934,13 @@ struct SFTPWindowView: View {
 
         if entry.isDirectory {
             Button("Open") { open(entry) }
-        } else if Self.isTextFile(entry.name) {
-            Button("Edit") { edit(entry) }
+        }
+        // Offered for every file, not only recognised extensions: the extension list
+        // decides what a *double-click* does, but a user who right-clicks a file has
+        // already decided they want to open it, and a missing menu item reads as a
+        // missing feature.
+        if !entry.isDirectory {
+            Button("Edit File") { edit(entry) }
         }
         Button(many ? "Download \(targets.count) Items…" : "Download…") { download(targets) }
         Button(many ? "Compress and Download \(targets.count) Items…" : "Compress and Download…") {

@@ -55,9 +55,6 @@ struct ContentView: View {
         .sheet(item: $model.editingSnippetID) { id in
             SnippetEditorView(snippetID: id) { model.editingSnippetID = nil }
         }
-        .sheet(isPresented: $model.isMultiExecPresented) {
-            MultiExecView()
-        }
         .fileImporter(
             isPresented: $model.isImportingConfCons,
             allowedContentTypes: [.xml],
@@ -139,15 +136,23 @@ struct SessionToolbarItems: View {
         .disabled(sftpTarget == nil)
 
         SnippetMenuButton()
-        RemoteToolsMenuButton()
 
+        // Multi-execution: mirror every keystroke into the other SSH sessions.
+        // Disabled outside split view because broadcasting to nothing is a mystery,
+        // not a feature.
         Button {
-            model.isMultiExecPresented = true
+            model.isBroadcasting.toggle()
         } label: {
-            Image(systemName: "square.on.square.dashed")
+            Image(systemName: model.isBroadcasting
+                  ? "rectangle.split.2x1.fill.badge.minus"
+                  : "rectangle.split.2x1.fill.badge.plus")
         }
-        .help("Run one command on several servers")
-        .accessibilityLabel("Run on several servers")
+        .help(model.isBroadcasting
+              ? "Stop sending typed input to every SSH session"
+              : "Send typed input to every SSH session")
+        .accessibilityLabel("Broadcast input")
+        .disabled(model.sessions.filter { model.find($0.nodeID)?.supportsSSH == true }.count < 2)
+        .foregroundStyle(model.isBroadcasting ? Color.orange : Color.primary)
 
         Button {
             model.requestRoot()

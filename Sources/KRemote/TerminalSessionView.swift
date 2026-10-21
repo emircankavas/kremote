@@ -28,6 +28,11 @@ struct TerminalSessionView: NSViewRepresentable {
     var snippetRequests: Int = 0
     var snippetCommand: String = ""
     var onSnippetHandled: @MainActor () -> Void = {}
+    /// Every encoded keystroke, for the broadcast. See `send(source:data:)`.
+    var onInput: @MainActor (Data) -> Void = { _ in }
+    /// Bytes mirrored from another session: written when `broadcastRequest` changes.
+    var broadcastRequest: Int = 0
+    var broadcastPayload: Data = Data()
     /// Command written when `inputRequests` changes (e.g. `sudo -S -i`).
     var pendingCommand: String = ""
     /// Password written (with a newline) shortly after the command, when the
@@ -62,11 +67,27 @@ struct TerminalSessionView: NSViewRepresentable {
         context.coordinator.installFocusMonitor(view: view, onFocus: onFocus)
         context.coordinator.lastInputRequest = inputRequests
         context.coordinator.lastSnippetRequest = snippetRequests
+        context.coordinator.onInput = onInput
+        context.coordinator.lastBroadcastRequest = broadcastRequest
         return view
     }
 
     func updateNSView(_ view: TerminalView, context: Context) {
         context.coordinator.updateFocusHandler(onFocus)
+        // Refreshed here as well as in `makeNSView`: SwiftUI rebuilds the struct on
+        // every model change, and a closure captured at creation would keep pointing at
+        // the old model — the broadcast would silently stop after any state update.
+        context.coordinator.onInput = onInput
+
+        // Mirrored input from another session. Only the counter is compared, so a
+        // keystroke typed here (which never bumps this pane's counter) cannot be
+        // mistaken for one to write.
+        if broadcastRequest != context.coordinator.lastBroadcastRequest {
+            context.coordinator.lastBroadcastRequest = broadcastRequest
+            if broadcastRequest > 0, !broadcastPayload.isEmpty {
+                context.coordinator.writeRaw(broadcastPayload)
+            }
+        }
         // A snippet arrives as one line: the script itself is base64 inside it, so
         // nothing in the body can leak into the terminal's line discipline.
         let previousSnippet = context.coordinator.lastSnippetRequest
@@ -114,6 +135,9 @@ struct TerminalSessionView: NSViewRepresentable {
 
         var lastInputRequest = 0
         var lastSnippetRequest = 0
+        var lastBroadcastRequest = 0
+        /// Set by `updateNSView` so `send(source:data:)` can report keystrokes.
+        var onInput: (@MainActor (Data) -> Void)?
 
         init(
             host: String,
@@ -194,6 +218,12 @@ struct TerminalSessionView: NSViewRepresentable {
             view?.feed(byteArray: ArraySlice(bytes))
         }
 
+        /// Writes already-encoded bytes, used by the broadcast to mirror input into a
+        /// session that did not receive the keystroke itself.
+        func writeRaw(_ data: Data) {
+            session?.send(data)
+        }
+
         /// Writes raw text to the ssh process (used for the root command).
         func write(_ text: String) {
             session?.send(Data(text.utf8))
@@ -222,7 +252,15 @@ struct TerminalSessionView: NSViewRepresentable {
 
         nonisolated func send(source: TerminalView, data: ArraySlice<UInt8>) {
             MainActor.assumeIsolated {
-                session?.send(Data(data))
+                let payload = Data(data)
+                session?.send(payload)
+                // Every byte typed is reported upward so the multi-execution broadcast
+                // can mirror it into the other sessions. Reported from here, not from
+                // the SwiftUI layer, because this is the one place that sees input
+                // after the terminal has encoded it (Enter becomes CR, arrows become
+                // escape sequences) — mirroring raw keystrokes would send the wrong
+                // bytes to a shell that expects the encoded form.
+                onInput?(payload)
             }
         }
 

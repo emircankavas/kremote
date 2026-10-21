@@ -292,6 +292,11 @@ private struct SessionContent: View {
                 snippetRequests: model.snippetTarget == session.id ? model.snippetRequest : 0,
                 snippetCommand: model.snippetTarget == session.id ? model.snippetCommand : "",
                 onSnippetHandled: { model.snippetHandled() },
+                // Every keystroke goes out to the other sessions while broadcasting.
+                // The sink is how this pane receives theirs.
+                onInput: { data in model.broadcast(data, from: session.id) },
+                broadcastRequest: model.broadcastOrigin == session.id ? 0 : model.broadcastRequest,
+                broadcastPayload: model.broadcastPayload,
                 pendingCommand: rootCommand(for: effective),
                 pendingPassword: effective?.password ?? "",
                 onStateChange: { newState in

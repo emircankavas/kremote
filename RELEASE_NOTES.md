@@ -1,4 +1,4 @@
-## KRemote 1.9.0 beta 1
+## KRemote 1.9.0 beta 2
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -6,8 +6,12 @@ connection tree with folder credential inheritance and mRemoteNG
 
 ### New: edit remote files in place
 
-Double-click a text file in the SFTP window — or right-click ▸ **Edit** — and it opens
-in an editor inside KRemote. Save writes it back over the same connection.
+Double-click a text file in the SFTP window — or right-click ▸ **Edit File**, offered for
+every file — and it opens in an editor inside KRemote.
+
+A double-click opens the editor for anything without a known binary extension, including
+files with no extension at all (`hosts`, `fstab`, a script called `test`); the editor
+refuses real binary content itself, which is the actual guard. Save writes it back over the same connection.
 
 - **Conflicting changes are not overwritten silently.** The size and modification time
   from when the file was read travel with the buffer; if either changed, the first Save
@@ -18,21 +22,21 @@ in an editor inside KRemote. Save writes it back over the same connection.
   not valid UTF-8 says so before saving rewrites it.
 - Closing with unsaved changes asks first.
 
-### New: run a command on several servers
 
-One command, every selected connection, results side by side. Each server runs in its
-own connection, so a dead host cannot hold up the rest, and the results stay in the
-order the servers were picked — a list that reshuffles as replies arrive is unreadable
-when looking for the one host that differs. Filter by text, or show failures only.
+### New: multi-execution
 
-### New: remote tools
+While split view is open, the toolbar's broadcast button mirrors **every keystroke** into
+all the other SSH sessions: type `apt update` once and watch it run everywhere.
 
-A menu of read-only diagnostics for the focused session: disk, memory, busiest
-processes, listening ports, routes, failed services, today's log errors, recent logins.
-MobaXterm ships a Unix userland because Windows has none; macOS does, so what is
-actually missing is knowing which command answers the question — and typing it
-correctly. Every entry is read-only by construction, which is why these run without a
-confirmation while snippets do not.
+This is not a command box that fans out once — it is the keyboard itself, which is what
+makes it usable for real work: answering a `sudo` password prompt, typing `y` at a
+confirmation, driving an editor. RDP panes are excluded, since mirroring escape
+sequences into an RDP stream would type garbage. The bytes mirrored are the ones the
+terminal already encoded (Enter as CR, arrows as escape sequences), so each shell
+receives exactly what a local keyboard would have sent it.
+
+The button is disabled with fewer than two SSH sessions open: broadcasting to nothing is
+a mystery, not a feature.
 
 ### New: transfers, file operations and a permissions sheet
 

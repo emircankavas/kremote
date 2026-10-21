@@ -70,25 +70,49 @@ final class AppModel {
     /// Set to present a blank editor for a new snippet.
     var isCreatingSnippet = false
 
-    /// True while the multi-execution window is open.
-    var isMultiExecPresented = false
+    // MARK: - Input broadcast
 
-    /// Runs a read-only diagnostic in the focused session.
+    /// When on, whatever is typed in one session is sent to every other SSH session
+    /// currently open. This is MobaXterm's multi-execution: not a command box that
+    /// fans out once, but the keyboard itself.
+    var isBroadcasting = false
+
+    /// Sessions that may receive broadcast input.
     ///
-    /// No confirmation: the catalogue is read-only by construction, and a dialog on
-    /// every `df -h` would teach people to dismiss dialogs. The command still goes
-    /// through the same marker + delivery path as a snippet, so the scrollback says
-    /// what ran.
-    func runTool(_ tool: RemoteTool) {
-        guard let session = focusedSession,
-              let node = find(session.nodeID), node.supportsSSH else {
-            lastError = "Tools run in an SSH session. Open one first."
-            return
+    /// RDP sessions are excluded: their "keyboard" is a different protocol, and
+    /// mirroring escape sequences into an RDP stream would type garbage. A session whose
+    /// protocol is SSH but which is in a split pane is included — that is the point.
+    var broadcastTargets: [Session] {
+        sessions.filter { session in
+            guard let node = find(session.nodeID) else { return false }
+            return node.supportsSSH
         }
-        snippetRequestCounter += 1
-        snippetTarget = session.id
-        snippetRequest = snippetRequestCounter
-        snippetCommand = "# KRemote tool: " + tool.name + "\n" + tool.command
+    }
+
+    /// Sessions the broadcast is currently reaching, for the status line.
+    var broadcastCount: Int { broadcastTargets.count }
+
+    /// The bytes to mirror, and a counter that says they are new.
+    ///
+    /// Every pane watches these two values; a pane whose session is not the origin
+    /// writes the payload when the counter changes. Same shape as the snippet delivery
+    /// path, so there is one mechanism to reason about rather than two.
+    private(set) var broadcastRequest = 0
+    private(set) var broadcastPayload = Data()
+    /// The session the bytes came from, so it does not write them back to itself.
+    private(set) var broadcastOrigin: Session.ID?
+
+    /// Mirrors one keystroke into every other SSH session.
+    ///
+    /// `origin` is skipped: the session the user typed into already received the bytes
+    /// from the terminal itself, and writing them again would double every character.
+    func broadcast(_ data: Data, from origin: Session.ID) {
+        guard isBroadcasting else { return }
+        // A session with nobody else to talk to is not worth a repaint per keystroke.
+        guard broadcastTargets.contains(where: { $0.id != origin }) else { return }
+        broadcastOrigin = origin
+        broadcastPayload = data
+        broadcastRequest += 1
     }
 
     /// A snippet waiting for confirmation, and the session it would run on.

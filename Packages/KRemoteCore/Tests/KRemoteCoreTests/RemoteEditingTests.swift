@@ -156,42 +156,4 @@ final class RemoteEditingTests: XCTestCase {
         XCTAssertTrue(combined.output.contains("warning: something"))
         XCTAssertFalse(combined.output.contains("\n\n"))
     }
-
-    // MARK: - Tools catalogue
-
-    /// Every tool must be identifiable and non-empty, or the menu draws a blank row.
-    func testCatalogueIsWellFormed() {
-        let ids = RemoteTool.catalogue.map(\.id)
-        XCTAssertEqual(ids.count, Set(ids).count, "ids must be unique")
-        for tool in RemoteTool.catalogue {
-            XCTAssertFalse(tool.name.isEmpty, tool.id)
-            XCTAssertFalse(tool.command.isEmpty, tool.id)
-            XCTAssertFalse(tool.group.isEmpty, tool.id)
-        }
-    }
-
-    /// The tools menu is read-only on purpose: a diagnostic that changes state is one
-    /// people stop trusting.
-    func testNoToolMutatesAnything() {
-        let forbidden = ["rm ", "rm -", "mv ", "dd ", "mkfs", "reboot", "shutdown",
-                         "systemctl restart", "systemctl stop", "kill "]
-        for tool in RemoteTool.catalogue {
-            let command = tool.command.lowercased()
-            for pattern in forbidden {
-                XCTAssertFalse(
-                    command.contains(pattern),
-                    "\(tool.id) looks like it changes state: \(tool.command)"
-                )
-            }
-        }
-    }
-
-    func testGroupsFollowCatalogueOrder() {
-        let groups = RemoteTool.groups
-        XCTAssertEqual(groups.first, "System")
-        XCTAssertEqual(groups.count, Set(groups).count)
-        // Every tool is reachable from exactly one group.
-        let grouped = groups.flatMap { RemoteTool.tools(in: $0) }.count
-        XCTAssertEqual(grouped, RemoteTool.catalogue.count)
-    }
 }
