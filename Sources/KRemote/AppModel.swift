@@ -83,6 +83,9 @@ final class AppModel {
         let sessionID: Session.ID
         /// Which surface the command goes to, so the terminal can pick it up.
         let request: Int
+        /// Values as edited in the sheet. The model keeps the last word on whether the
+        /// run may proceed; the sheet is only the editor.
+        var values: [String: String]
     }
 
     /// Bumped per request so a repeat of the same snippet is still a new event.
@@ -157,25 +160,45 @@ final class AppModel {
             return
         }
         snippetRequestCounter += 1
+        // Seeded from the snippet's own defaults only. Values typed for a previous run
+        // are deliberately not remembered: the answer to "which server" changes, and a
+        // stale one is a command aimed at the wrong host.
+        let run = SnippetRun.prepared(snippet)
         pendingSnippet = PendingSnippet(
             snippet: snippet,
             sessionID: session.id,
-            request: snippetRequestCounter
+            request: snippetRequestCounter,
+            values: run.values
         )
     }
 
     /// The user said yes: hand the command to the terminal in that session.
-    func confirmSnippet() {
+    ///
+    /// The values come from the confirmation sheet, which is the only place they are
+    /// edited. `canRun` is checked again here rather than trusted from the sheet: a
+    /// required field can be cleared between the last keystroke and the click.
+    func confirmSnippet(values: [String: String]) {
         guard let pending = pendingSnippet else { return }
+        let run = SnippetRun(snippet: pending.snippet, values: values)
+        guard run.canRun else {
+            lastError = "Fill in the required parameters before running this snippet."
+            return
+        }
         pendingSnippet = nil
         snippetTarget = pending.sessionID
         snippetRequest = pending.request
+
         // A marker first, so the user's scrollback shows which snippet ran. It is a
         // shell comment: it cannot execute, cannot be a syntax error in any POSIX sh,
-        // and stays visible above the script's own output.
-        let marker = "# KRemote snippet: " + pending.snippet.name
-            .replacingOccurrences(of: "\n", with: " ")
-        snippetCommand = marker + "\n" + SnippetLibrary.command(for: pending.snippet)
+        // and stays visible above the script's own output. Parameter *names* appear,
+        // never their values — the marker is not a place for a password to show up.
+        let clean = pending.snippet.name.replacingOccurrences(of: "\n", with: " ")
+        var marker = "# KRemote snippet: " + clean
+        let names = pending.snippet.parameters.filter { $0.isValidName }.map { $0.name }
+        if !names.isEmpty {
+            marker += " (" + names.joined(separator: ", ") + ")"
+        }
+        snippetCommand = marker + "\n" + run.command()
     }
 
     func cancelSnippet() {

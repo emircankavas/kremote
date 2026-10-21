@@ -14,18 +14,47 @@ public struct Snippet: Identifiable, Codable, Hashable, Sendable {
     public var body: String
     /// Ordering hint for the menu; ties fall back to the name.
     public var sortIndex: Int
+    /// Values the script expects, shown before it runs.
+    ///
+    /// Variables rather than positional arguments: a script written as
+    /// `$TARGET_HOST` is readable on its own, while `$3` means nothing without the
+    /// caller's ordering in mind.
+    public var parameters: [SnippetParameter]
 
-    public init(id: UUID = UUID(), name: String, body: String, sortIndex: Int = 0) {
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        body: String,
+        sortIndex: Int = 0,
+        parameters: [SnippetParameter] = []
+    ) {
         self.id = id
         self.name = name
         self.body = body
         self.sortIndex = sortIndex
+        self.parameters = parameters
+    }
+
+    // Decoded leniently: a snippets.json written before parameters existed has no
+    // such key, and losing a whole library over a missing array would be absurd.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        body = try container.decode(String.self, forKey: .body)
+        sortIndex = try container.decodeIfPresent(Int.self, forKey: .sortIndex) ?? 0
+        parameters = try container.decodeIfPresent([SnippetParameter].self, forKey: .parameters) ?? []
     }
 
     /// Whether the body would run at all. An empty snippet is a menu entry that
     /// does nothing, which reads as a bug.
     public var isRunnable: Bool {
         !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Parameters that must be filled in before the script can run.
+    public var requiredParameters: [SnippetParameter] {
+        parameters.filter { $0.isRequired }
     }
 }
 
@@ -57,15 +86,56 @@ public enum SnippetLibrary {
     ///   Ctrl-C — a failed run must not leave an executable copy of the user's script
     ///   on a shared server.
     public static func command(for snippet: Snippet) -> String {
+        command(for: snippet, values: [:])
+    }
+
+    /// The same command, with parameter values bound.
+    ///
+    /// Values are supplied by the user, which makes this the one place in the app
+    /// where input becomes shell code. They are therefore **never** interpolated into
+    /// the command text: each one is base64-encoded and decoded into an environment
+    /// assignment by `sh` itself. A value containing `;`, backticks or a quote is then
+    /// a variable holding those characters, not a command — and the same holds for a
+    /// password with a space or a newline in it.
+    ///
+    /// The assignments are a command prefix in front of `sh`, so the script sees them
+    /// as environment, which is what `$NAME` in a shell script reads.
+    public static func command(for snippet: Snippet, values: [String: String]) -> String {
         let encoded = Data(snippet.body.utf8).base64EncodedString()
-        return [
+        let assignments = environmentAssignments(for: snippet, values: values)
+
+        var parts = [
             "( f=$(mktemp /tmp/kremote-snippet-XXXXXX.sh)",
             "trap 'rm -f \"$f\"' EXIT",
             "printf '%s' '\(encoded)' | \(decoder) > \"$f\"",
-            "sh \"$f\"",
-            "exit $?",
-            ")",
-        ].joined(separator: "; ")
+        ]
+        if !assignments.isEmpty {
+            parts.append(assignments)
+        }
+        parts.append("sh \"$f\"")
+        parts.append("exit $?")
+        parts.append(")")
+        return parts.joined(separator: "; ")
+    }
+
+    /// `A=$(printf %s B64 | base64 -d) B=… sh` — the prefix that binds values.
+    ///
+    /// Built as a command-prefix assignment list rather than export statements, so the
+    /// variables exist only for the script and not for the interactive shell
+    /// afterwards: leaving a password variable defined in the user's session would
+    /// leak it to every later command.
+    ///
+    /// A name that is not a valid shell identifier is skipped — such a variable cannot
+    /// be exported at all, and inventing one would silently hand the script nothing.
+    static func environmentAssignments(for snippet: Snippet, values: [String: String]) -> String {
+        let assignments = snippet.parameters.compactMap { parameter -> String? in
+            guard parameter.isValidName else { return nil }
+            let value = parameter.value(from: values)
+            let encoded = Data(value.utf8).base64EncodedString()
+            // A subshell keeps the base64 text out of the scrollback too.
+            return "\(parameter.name)=$(printf %s '\(encoded)' | \(decoder))"
+        }
+        return assignments.joined(separator: " ")
     }
 
     /// One line, for the confirmation dialog.

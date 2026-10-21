@@ -58,9 +58,21 @@ struct SnippetConfirmSheet: View {
     @Environment(AppModel.self) private var model
     let pending: AppModel.PendingSnippet
 
+    /// Edited here, handed to the model only on Run. Holding them locally keeps the
+    /// sheet cancellable: half-typed values must not linger in the model.
+    @State private var values: [String: String] = [:]
+
     private var isDestructive: Bool {
         SnippetLibrary.isDestructive(pending.snippet)
     }
+
+    private var run: SnippetRun {
+        SnippetRun(snippet: pending.snippet, values: values)
+    }
+
+    /// A run whose required fields are still empty cannot start: the script would
+    /// silently receive an empty string.
+    private var canRun: Bool { run.canRun }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -80,6 +92,10 @@ struct SnippetConfirmSheet: View {
                 Text(model.sessionTitle(for: pending.sessionID) ?? "this server")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+            }
+
+            if !pending.snippet.parameters.isEmpty {
+                parameterFields
             }
 
             ScrollView {
@@ -108,14 +124,70 @@ struct SnippetConfirmSheet: View {
                 Spacer()
                 Button("Cancel", role: .cancel) { model.cancelSnippet() }
                     .keyboardShortcut(.cancelAction)
-                Button(isDestructive ? "Run Anyway" : "Run") { model.confirmSnippet() }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
-                    .tint(isDestructive ? .orange : .accentColor)
+                Button(isDestructive ? "Run Anyway" : "Run") {
+                    model.confirmSnippet(values: values)
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .tint(isDestructive ? .orange : .accentColor)
+                .disabled(!canRun)
             }
         }
         .padding(20)
-        .frame(width: 520)
+        .frame(width: 560)
+        .onAppear {
+            // Seed once from the defaults the model prepared. `onAppear` rather than an
+            // initialiser because the sheet is rebuilt on every model change.
+            if values.isEmpty { values = pending.values }
+        }
+    }
+
+    /// The value fields, in the order the parameters were defined.
+    private var parameterFields: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(pending.snippet.parameters) { parameter in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 4) {
+                        Text(parameter.name)
+                            .font(.system(size: 11, design: .monospaced))
+                        if parameter.isRequired {
+                            Text("required")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                        } else {
+                            Text("default")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    if parameter.isSecret {
+                        // A password typed into a script form should not sit on screen
+                        // while the user reads the script below it.
+                        SecureField(parameter.note.isEmpty ? parameter.name : parameter.note,
+                                    text: binding(for: parameter))
+                            .textFieldStyle(.roundedBorder)
+                    } else {
+                        TextField(parameter.note.isEmpty ? parameter.name : parameter.note,
+                                  text: binding(for: parameter))
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+                    }
+                }
+            }
+
+            if !run.missingRequired.isEmpty {
+                Text("Fill in: " + run.missingRequired.map(\.name).joined(separator: ", "))
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private func binding(for parameter: SnippetParameter) -> Binding<String> {
+        Binding(
+            get: { values[parameter.name] ?? parameter.defaultValue },
+            set: { values[parameter.name] = $0 }
+        )
     }
 }
 
@@ -131,6 +203,8 @@ struct SnippetEditorView: View {
     @State private var script = ""
     /// Guards against a stray Return in the name field saving a half-written script.
     @State private var loaded = false
+    /// The parameter list, edited in place.
+    @State private var parameters: [SnippetParameter] = []
 
     private var isNew: Bool { snippetID == nil }
     private var canSave: Bool {
@@ -158,6 +232,8 @@ struct SnippetEditorView: View {
                     )
             }
 
+            parameterSection
+
             Text("Runs with the server's sh. The body is sent as a file, so quotes, heredocs and several lines are safe.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -180,7 +256,7 @@ struct SnippetEditorView: View {
             }
         }
         .padding(20)
-        .frame(width: 620)
+        .frame(width: 660)
         .onAppear {
             guard !loaded else { return }
             loaded = true
@@ -188,7 +264,100 @@ struct SnippetEditorView: View {
             else { return }
             name = existing.name
             script = existing.body
+            parameters = existing.parameters
         }
+    }
+
+    /// The parameter list plus the "detect from script" helper.
+    private var parameterSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("Parameters")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Detect from Script") { detectParameters() }
+                    .controlSize(.small)
+                    .help("Find $VARIABLES in the script and add them to this list")
+                Button {
+                    parameters.append(SnippetParameter(name: nextParameterName()))
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .controlSize(.small)
+                .help("Add a parameter by hand")
+            }
+
+            if parameters.isEmpty {
+                Text("No parameters. The script runs as written.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                ScrollView {
+                    VStack(spacing: 4) {
+                        ForEach($parameters) { $parameter in
+                            parameterRow($parameter)
+                        }
+                    }
+                }
+                .frame(maxHeight: 150)
+            }
+        }
+    }
+
+    private func parameterRow(_ parameter: Binding<SnippetParameter>) -> some View {
+        HStack(spacing: 6) {
+            TextField("NAME", text: parameter.name)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11, design: .monospaced))
+                .frame(width: 130)
+                // A name that is not a shell identifier cannot be exported, so it is
+                // flagged rather than silently producing a command that does nothing.
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .strokeBorder(
+                            SnippetParameter.isValidName(parameter.wrappedValue.name)
+                                ? Color.clear : Color.orange,
+                            lineWidth: 1
+                        )
+                )
+
+            TextField("default (optional)", text: parameter.defaultValue)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11, design: .monospaced))
+
+            Toggle("secret", isOn: parameter.isSecret)
+                .toggleStyle(.checkbox)
+                .font(.caption2)
+                .help("Hide the value in the run dialog")
+
+            Button {
+                parameters.removeAll { $0.id == parameter.wrappedValue.id }
+            } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.borderless)
+            .help("Remove this parameter")
+        }
+    }
+
+    /// Adds every `$VARIABLE` the script mentions that is not already listed.
+    ///
+    /// Deliberately additive: detection never removes a parameter the user defined,
+    /// because a script may read a variable that only appears in a string the scanner
+    /// cannot see through.
+    private func detectParameters() {
+        let existing = Set(parameters.map(\.name))
+        for name in SnippetParameterScanner.scan(script) where !existing.contains(name) {
+            parameters.append(SnippetParameter(name: name))
+        }
+    }
+
+    private func nextParameterName() -> String {
+        var index = parameters.count + 1
+        let taken = Set(parameters.map(\.name))
+        while taken.contains("PARAM\(index)") { index += 1 }
+        return "PARAM\(index)"
     }
 
     private func save() {
@@ -201,7 +370,8 @@ struct SnippetEditorView: View {
             id: existing?.id ?? UUID(),
             name: trimmed,
             body: script,
-            sortIndex: existing?.sortIndex ?? (model.snippets.count)
+            sortIndex: existing?.sortIndex ?? (model.snippets.count),
+            parameters: parameters.filter { $0.isValidName }
         ))
         onClose()
     }

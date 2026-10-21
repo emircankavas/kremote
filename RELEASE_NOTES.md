@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 27
+## KRemote 1.8.0 beta 28
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -48,6 +48,30 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### New: snippet parameters
+
+A script can ask for values before it runs. Declare them in the editor — by hand, or
+with **Detect from Script**, which finds the `$VARIABLES` the body mentions and adds
+them — and the run dialog shows a field for each.
+
+Parameters are **named variables**, not positional arguments: `$TARGET_HOST` explains
+itself where `$3` does not. They are bound as an environment prefix on the `sh`
+invocation, so they exist for the script and not for your interactive shell
+afterwards — a password variable should not outlive the run.
+
+A parameter with no default is marked *required* and Run stays disabled until it is
+filled in; otherwise the script would silently receive an empty string. A parameter
+marked *secret* is masked in the run dialog and in the marker line.
+
+Values are never remembered between runs. Only the snippet's own defaults are stored:
+the answer to "which server" changes, and a stale one is a command aimed at the wrong
+host.
+
+The values themselves never appear in the generated command. Each is base64-encoded
+and decoded by the shell into its assignment, so a value containing a quote, a
+semicolon or a newline is data the script receives rather than something the shell
+interprets.
 
 ### Fixed: running a snippet closed the SSH session
 
@@ -401,7 +425,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.27 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.28 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not
