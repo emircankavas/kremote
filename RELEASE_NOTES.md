@@ -1,8 +1,38 @@
-## KRemote 1.8.0 beta 29
+## KRemote 1.9.0 beta 1
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
 `confCons.xml` import.
+
+### New: edit remote files in place
+
+Double-click a text file in the SFTP window — or right-click ▸ **Edit** — and it opens
+in an editor inside KRemote. Save writes it back over the same connection.
+
+- **Conflicting changes are not overwritten silently.** The size and modification time
+  from when the file was read travel with the buffer; if either changed, the first Save
+  explains and offers **Overwrite** instead of writing.
+- **Permissions are preserved**: the SFTP write creates with 0644, which would turn a
+  `0600` key file world-readable on save.
+- A file with a NUL byte in it is **refused** rather than truncated, and a file that is
+  not valid UTF-8 says so before saving rewrites it.
+- Closing with unsaved changes asks first.
+
+### New: run a command on several servers
+
+One command, every selected connection, results side by side. Each server runs in its
+own connection, so a dead host cannot hold up the rest, and the results stay in the
+order the servers were picked — a list that reshuffles as replies arrive is unreadable
+when looking for the one host that differs. Filter by text, or show failures only.
+
+### New: remote tools
+
+A menu of read-only diagnostics for the focused session: disk, memory, busiest
+processes, listening ports, routes, failed services, today's log errors, recent logins.
+MobaXterm ships a Unix userland because Windows has none; macOS does, so what is
+actually missing is knowing which command answers the question — and typing it
+correctly. Every entry is read-only by construction, which is why these run without a
+confirmation while snippets do not.
 
 ### New: transfers, file operations and a permissions sheet
 
