@@ -91,6 +91,23 @@ public struct AdHocTarget: Equatable, Sendable {
 
     /// The menu label: what the user typed, so they can see it was understood.
     public var displayLabel: String { raw }
+
+    /// Nodes in the tree that already point at this host.
+    ///
+    /// Offering "Connect to 10.0.31.11" when `10.0.31.11` is saved as *qs-ansible* would
+    /// throw away the saved name, its folder (and the credentials inherited from that
+    /// folder) and any RDP settings — for an address the app already knows. The saved
+    /// entry wins; the ad-hoc row is only for hosts that are genuinely not there.
+    public static func existingMatches(for target: AdHocTarget, in roots: [ConnectionNode]) -> [ConnectionNode] {
+        ConnectionNode.allNodes(in: roots).filter { node in
+            guard !node.isFolder, node.isOpenable else { return false }
+            guard node.host.caseInsensitiveCompare(target.host) == .orderedSame else { return false }
+            // A port the user typed narrows the match; without one, any saved port is
+            // the same host.
+            if let wanted = target.port, node.port != wanted { return false }
+            return true
+        }
+    }
 }
 
 /// A host that was connected to without a tree entry.

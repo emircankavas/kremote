@@ -111,6 +111,73 @@ final class AdHocTargetTests: XCTestCase {
         XCTAssertNil(parsed?.port, "must not invent a port from an ambiguous string")
     }
 
+    // MARK: - Already in the tree
+
+    private func savedNode(name: String, host: String, port: Int = 0, protocol protocolName: String = "SSH2") -> ConnectionNode {
+        ConnectionNode(kind: .connection, name: name, host: host, port: port, protocolName: protocolName)
+    }
+
+    /// The reported bug: `10.0.31.11` was saved as *qs-ansible*, and the search offered to
+    /// connect to the address anyway. Taking that would discard the saved name, its
+    /// folder, and the credentials inherited from that folder.
+    func testSavedHostSuppressesTheAdHocOffer() throws {
+        let roots = [savedNode(name: "qs-ansible", host: "10.0.31.11")]
+        let target = try XCTUnwrap(AdHocTarget.parse("10.0.31.11"))
+        XCTAssertEqual(AdHocTarget.existingMatches(for: target, in: roots).map(\.name), ["qs-ansible"])
+    }
+
+    /// Case and surrounding whitespace must not defeat the match: a hostname is not
+    /// case-sensitive.
+    func testMatchIsCaseInsensitive() throws {
+        let roots = [savedNode(name: "prod", host: "Prod-Web-01.kavas.dev")]
+        let target = try XCTUnwrap(AdHocTarget.parse("prod-web-01.kavas.dev"))
+        XCTAssertEqual(AdHocTarget.existingMatches(for: target, in: roots).count, 1)
+    }
+
+    /// A different address is a different host, even if the name looks similar.
+    func testDifferentHostDoesNotMatch() throws {
+        let roots = [savedNode(name: "qs-ansible", host: "10.0.31.11")]
+        let target = try XCTUnwrap(AdHocTarget.parse("10.0.31.12"))
+        XCTAssertTrue(AdHocTarget.existingMatches(for: target, in: roots).isEmpty)
+    }
+
+    /// A saved host on another port is a different endpoint, so the ad-hoc row stays.
+    func testPortNarrowsTheMatch() throws {
+        let roots = [savedNode(name: "qs-ansible", host: "10.0.31.11", port: 22)]
+        let other = try XCTUnwrap(AdHocTarget.parse("10.0.31.11:2222"))
+        XCTAssertTrue(AdHocTarget.existingMatches(for: other, in: roots).isEmpty)
+
+        let same = try XCTUnwrap(AdHocTarget.parse("10.0.31.11:22"))
+        XCTAssertEqual(AdHocTarget.existingMatches(for: same, in: roots).count, 1)
+    }
+
+    /// Typing just the host matches a saved entry that has an explicit port: the user did
+    /// not ask for a specific port, so any saved port is that host.
+    func testNoPortMatchesAnySavedPort() throws {
+        let roots = [savedNode(name: "qs-ansible", host: "10.0.31.11", port: 2222)]
+        let target = try XCTUnwrap(AdHocTarget.parse("10.0.31.11"))
+        XCTAssertEqual(AdHocTarget.existingMatches(for: target, in: roots).count, 1)
+    }
+
+    /// Folders are not connections; a folder that happens to carry an address must not
+    /// suppress the row.
+    func testFoldersDoNotMatch() throws {
+        let folder = ConnectionNode(kind: .folder, name: "10.0.31.11", host: "10.0.31.11")
+        let target = try XCTUnwrap(AdHocTarget.parse("10.0.31.11"))
+        XCTAssertTrue(AdHocTarget.existingMatches(for: target, in: [folder]).isEmpty)
+    }
+
+    /// The match is found wherever the node sits, not only at the root.
+    func testMatchInsideAFolder() throws {
+        let nested = ConnectionNode(
+            kind: .folder,
+            name: "Production",
+            children: [savedNode(name: "qs-ansible", host: "10.0.31.11")]
+        )
+        let target = try XCTUnwrap(AdHocTarget.parse("10.0.31.11"))
+        XCTAssertEqual(AdHocTarget.existingMatches(for: target, in: [nested]).count, 1)
+    }
+
     // MARK: - Node construction
 
     func testNodeUsesTheProtocolDefaultPortWhenNoneGiven() {

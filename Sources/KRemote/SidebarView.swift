@@ -85,8 +85,18 @@ struct SidebarView: View {
                 Button("SSH") { model.connectAdHoc(target, protocol: .ssh) }
                 Button("RDP") { model.connectAdHoc(target, protocol: .rdp) }
             } label: {
+                // Bordered and tinted rather than a bare glyph: an untinted chevron in a
+                // sidebar row is nearly invisible on a dark background, which is exactly
+                // how this was reported.
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.caption)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.accentColor.opacity(0.15))
+                    )
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
@@ -107,10 +117,14 @@ struct SidebarView: View {
 
         if model.isSearching {
             let results = model.searchResults
-            // What was typed, if it could be a host. Offered whether or not the search
-            // matched something: a user typing an address that merely *looks* like a
-            // saved connection's name should still be able to reach it directly.
-            let adHoc = AdHocTarget.parse(model.searchQuery)
+            // What was typed, if it could be a host **and** the tree does not already
+            // have it. Offering an ad-hoc connection to an address that is saved under a
+            // name would throw away that name, its folder and the credentials inherited
+            // from it — for a host the app already knows. The saved entry is the answer;
+            // the ad-hoc row is only for addresses that are genuinely absent.
+            let adHoc = AdHocTarget.parse(model.searchQuery).flatMap { target in
+                AdHocTarget.existingMatches(for: target, in: model.roots).isEmpty ? target : nil
+            }
 
             if results.isEmpty, adHoc == nil {
                 Text("No matches")

@@ -1,4 +1,4 @@
-## KRemote 1.9.0 beta 5
+## KRemote 1.9.0 beta 6
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -21,6 +21,14 @@ about. Credentials are read from the password store if this host has been used b
 
 A query that cannot be a host — a sentence, something with a `/`, an out-of-range port —
 is still just a search, so the row never appears for something that was never an address.
+
+**The row is withheld when the tree already has that host.** Typing `10.0.31.11` when it
+is saved as *qs-ansible* used to offer both; taking the ad-hoc one would have discarded
+the saved name, its folder and the credentials inherited from that folder. The saved entry
+is the answer for an address the app already knows.
+
+The protocol chevron was a bare untinted glyph, which on a dark sidebar was almost
+invisible. It is now accent-tinted on a light accent background.
 
 ### New: edit remote files in place
 
