@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 28
+## KRemote 1.8.0 beta 29
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -48,6 +48,15 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### Fixed: parameters never reached the script
+
+The values were bound as a separate statement — `text=…; sh script` — which defines a
+*shell* variable. A shell variable is not exported, so the script ran in a child
+process that could not see it: every `$text` was empty.
+
+`text=… sh script` is what puts a value in the child's environment. The assignment is
+now the prefix of the invocation rather than a statement before it.
 
 ### New: snippet parameters
 
@@ -425,7 +434,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.28 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.29 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not

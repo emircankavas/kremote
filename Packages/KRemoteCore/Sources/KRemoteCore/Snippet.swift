@@ -109,10 +109,13 @@ public enum SnippetLibrary {
             "trap 'rm -f \"$f\"' EXIT",
             "printf '%s' '\(encoded)' | \(decoder) > \"$f\"",
         ]
-        if !assignments.isEmpty {
-            parts.append(assignments)
-        }
-        parts.append("sh \"$f\"")
+        // **The assignments must be the prefix of the `sh` invocation, not a separate
+        // statement.** `A=x; sh script` defines a *shell* variable, which is not
+        // exported and is invisible to the child; `A=x sh script` puts it in the
+        // child's environment, which is what `$A` inside the script reads. Joined with
+        // `;` this silently handed every script empty values.
+        let invocation = assignments.isEmpty ? "sh \"$f\"" : "\(assignments) sh \"$f\""
+        parts.append(invocation)
         parts.append("exit $?")
         parts.append(")")
         return parts.joined(separator: "; ")

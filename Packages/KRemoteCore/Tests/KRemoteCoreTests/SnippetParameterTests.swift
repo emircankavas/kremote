@@ -159,11 +159,15 @@ final class SnippetParameterTests: XCTestCase {
         let command = SnippetLibrary.command(for: snippet, values: [:])
         XCTAssertFalse(command.contains("export "),
                        "an exported variable outlives the script in the user's shell")
-        XCTAssertNotNil(command.range(of: "A=$("))
-        // The assignment must come before `sh` runs the script.
-        if let a = command.range(of: "A=$("), let s = command.range(of: "; sh ") {
-            XCTAssertLessThan(a.lowerBound, s.lowerBound)
-        }
+
+        // The assignment must be *attached* to the `sh` invocation: `A=x sh file`
+        // puts it in the child's environment. `A=x; sh file` defines a shell variable
+        // that is never exported, so the script reads nothing — which is exactly the
+        // bug this pins.
+        XCTAssertTrue(command.contains(") sh \"$f\""),
+                      "assignments must prefix the sh invocation: \(command)")
+        XCTAssertFalse(command.contains("; sh \"$f\""),
+                       "a semicolon detaches them, leaving the script with empty values")
     }
 
     /// No assignments, no dangling separator.
