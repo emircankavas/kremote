@@ -113,6 +113,48 @@ extension UUID: @retroactive Identifiable {
 }
 
 /// The SFTP, `#` (become root) and split-view controls, shown in the window title bar.
+/// The multi-execution toggle.
+///
+/// Its own view because it has three visual states — off, on, and unavailable — and the
+/// third one is the reason it exists: a control that paints its own colours does not dim
+/// itself when disabled, so it has to be done here.
+private struct BroadcastButton: View {
+    let isOn: Bool
+    let isAvailable: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "keyboard.badge.ellipsis")
+                .foregroundStyle(glyphColour)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(isOn && isAvailable ? Color.orange : Color.clear)
+                )
+        }
+        .help(helpText)
+        .accessibilityLabel("Broadcast input to all sessions")
+        .accessibilityValue(isOn ? "on" : "off")
+        .disabled(!isAvailable)
+    }
+
+    private var glyphColour: Color {
+        if !isAvailable { return .secondary.opacity(0.4) }
+        return isOn ? .white : .primary
+    }
+
+    private var helpText: String {
+        if !isAvailable {
+            return "Open two or more SSH sessions to send input to all of them"
+        }
+        return isOn
+            ? "Every keystroke is going to all SSH sessions — click to stop"
+            : "Send every keystroke to all SSH sessions"
+    }
+}
+
 struct SessionToolbarItems: View {
     @Environment(AppModel.self) private var model
 
@@ -144,27 +186,13 @@ struct SessionToolbarItems: View {
         // version swapped between two SF Symbols that do not exist on this OS — it
         // rendered as an empty circle with no colour change at all. A filled background
         // when on is the one thing a user cannot misread.
-        Button {
+        // An explicit colour overrides the dimming `.disabled` normally applies, so a
+        // `Color.primary` glyph stayed fully opaque and looked clickable with no sessions
+        // open — unlike every neighbouring icon. `isEnabled` is read and the tint chosen
+        // by hand, which is the only way to dim a view that already paints itself.
+        BroadcastButton(isOn: model.isBroadcasting, isAvailable: model.broadcastTargets.count >= 2) {
             model.isBroadcasting.toggle()
-        } label: {
-            Image(systemName: "keyboard.badge.ellipsis")
-                .foregroundStyle(model.isBroadcasting ? Color.white : Color.primary)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 3)
-                .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(model.isBroadcasting ? Color.orange : Color.clear)
-                )
         }
-        // No `.plain`: that strips the toolbar's own button framing, which is what made
-        // this item look like it belonged to a different control group than its
-        // neighbours. The tint is supplied by the background instead.
-        .help(model.isBroadcasting
-              ? "Every keystroke is going to all SSH sessions — click to stop"
-              : "Send every keystroke to all SSH sessions")
-        .accessibilityLabel("Broadcast input to all sessions")
-        .accessibilityValue(model.isBroadcasting ? "on" : "off")
-        .disabled(model.broadcastTargets.count < 2)
 
         Button {
             model.requestRoot()

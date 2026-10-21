@@ -1,4 +1,4 @@
-## KRemote 1.9.0 beta 3
+## KRemote 1.9.0 beta 4
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -42,9 +42,13 @@ a mystery, not a feature.
 
 It used two SF Symbols that this version of macOS does not have, so the toolbar drew an
 empty circle that never changed colour — indistinguishable from a missing button. It now
-uses a symbol that exists and fills orange while broadcasting, and it keeps the toolbar's
-normal button framing so it sits in the same group as its neighbours rather than looking
-like a stray control.
+uses a symbol that exists, fills orange while broadcasting, and keeps the toolbar's normal
+button framing so it sits in the same group as its neighbours.
+
+It also no longer looks clickable when there is nothing to broadcast to. A view that
+paints its own foreground colour does not inherit the dimming `.disabled` applies, so the
+tint is now chosen from the availability itself: grey at 40% with fewer than two SSH
+sessions, normal when ready, white on orange when on.
 
 ### New: transfers, file operations and a permissions sheet
 
