@@ -44,35 +44,43 @@ final class SnippetTests: XCTestCase {
         XCTAssertEqual(String(decoding: decoded, as: UTF8.self), body)
     }
 
-    /// The file must be removed even when the script fails, or a shared server keeps
-    /// an executable copy of the user's script.
-    func testCommandCleansUpUnconditionally() {
-        let command = SnippetLibrary.command(for: snippet("exit 1"))
-        XCTAssertTrue(command.contains("rm -f"))
-        // Cleanup runs after the status is captured, so the exit code survives it.
-        let removal = command.range(of: "rm -f")
-        let capture = command.range(of: "rc=$?")
-        XCTAssertNotNil(removal)
-        XCTAssertNotNil(capture)
-        if let removal, let capture {
-            XCTAssertLessThan(capture.lowerBound, removal.lowerBound,
-                              "the exit status must be captured before the file is removed")
-        }
+    /// **The whole command must run inside a subshell.**
+    ///
+    /// The app writes into an interactive login shell, where a bare `exit` does not
+    /// report a status — it ends the shell and the ssh session with it. This shipped
+    /// once without the parentheses: running `whoami` closed the user's session.
+    func testCommandIsWrappedInASubshell() {
+        let command = SnippetLibrary.command(for: snippet("whoami"))
+        XCTAssertTrue(command.hasPrefix("( "), "must open a subshell: \(command)")
+        XCTAssertTrue(command.hasSuffix(" )"), "must close the subshell: \(command)")
+        XCTAssertTrue(command.contains("exit $?"),
+                      "exit belongs inside the subshell, reporting the script's status")
     }
 
-    /// The exit code of the script must be the command's exit code, otherwise a
-    /// failing snippet looks like it succeeded.
+    /// Cleanup has to survive a failing script *and* an interrupt.
+    ///
+    /// `trap … EXIT` covers both; a plain `rm -f` after the run is skipped when the
+    /// script is killed, leaving an executable copy of the user's script on the server.
+    func testCleanupIsATrapNotATrailingRm() {
+        let command = SnippetLibrary.command(for: snippet("echo"))
+        XCTAssertTrue(command.contains("trap 'rm -f"),
+                      "cleanup must be a trap so Ctrl-C also removes the file")
+        XCTAssertTrue(command.contains("mktemp"),
+                      "a unique file, not one derived from a guessable name")
+    }
+
+    /// The exit code of the script must reach `$?` in the interactive shell, otherwise
+    /// a failing snippet looks like it succeeded.
     func testExitStatusIsPropagated() {
         let command = SnippetLibrary.command(for: snippet("exit 7"))
-        XCTAssertTrue(command.hasSuffix("exit $rc"), "got: \(command)")
+        XCTAssertTrue(command.contains("exit $?"), "got: \(command)")
     }
 
-    /// `$$` keeps two snippets run at the same moment from overwriting each other's
-    /// temp file.
-    func testTempPathIsPerShell() {
+    /// Two snippets run at once must not share a temp file.
+    func testTempFileIsUniquePerRun() {
         let command = SnippetLibrary.command(for: snippet("echo"))
-        XCTAssertTrue(command.contains("kremote-snippet-$$.sh"),
-                      "the pid must be in the path so concurrent runs do not collide")
+        XCTAssertTrue(command.contains("mktemp"),
+                      "mktemp gives each run its own file")
     }
 
     /// BSD `base64` spells decode `-D`; GNU spells it `-d`. `-d` is the one both

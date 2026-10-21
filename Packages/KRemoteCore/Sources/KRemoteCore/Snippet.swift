@@ -40,28 +40,31 @@ public enum SnippetLibrary {
 
     /// The command that runs `snippet` on a POSIX server.
     ///
-    /// Design notes, because this is the part that can go wrong:
+    /// Every detail here was decided by running it in a real pty, because the app
+    /// writes into an *interactive login shell* and that changes what each part means:
     ///
-    /// - **The body never touches the terminal's input buffer.** Pasting a
-    ///   multi-line script into a pty makes the shell execute it line by line as it
-    ///   arrives, which mangles anything with quotes, heredocs or `if` blocks and
-    ///   makes a partial run impossible to abort.
+    /// - **Wrapped in parentheses.** A bare `exit $rc` at the end does not report a
+    ///   status in an interactive shell — it terminates the shell, and the ssh session
+    ///   with it. Inside parentheses `exit` ends only the subshell. This shipped once
+    ///   without the parentheses and closed the session after running `whoami`.
+    /// - **The body never touches the terminal's input buffer.** Pasting a multi-line
+    ///   script into a pty makes the shell execute it line by line as the bytes
+    ///   arrive, which mangles quotes, heredocs and `if` blocks, and makes a partial
+    ///   run impossible to abort.
     /// - **It is base64, not quoted.** A script can contain any byte; wrapping it in
-    ///   single quotes breaks on the first `'` and escaping every case is a bug
-    ///   waiting to happen. Base64 has no characters the shell treats specially.
-    /// - **The file is removed even on failure**, by `trap`, so a failed run does not
-    ///   leave an executable copy of the user's script on a shared server.
+    ///   single quotes breaks on the first `'`.
+    /// - **`mktemp` and a `trap`.** The file goes away on success, on failure, and on
+    ///   Ctrl-C — a failed run must not leave an executable copy of the user's script
+    ///   on a shared server.
     public static func command(for snippet: Snippet) -> String {
         let encoded = Data(snippet.body.utf8).base64EncodedString()
-        // `$$` is the shell's own pid, so two snippets run at once cannot collide.
-        let path = "/tmp/kremote-snippet-$$.sh"
         return [
-            "f=\"\(path)\"",
+            "( f=$(mktemp /tmp/kremote-snippet-XXXXXX.sh)",
+            "trap 'rm -f \"$f\"' EXIT",
             "printf '%s' '\(encoded)' | \(decoder) > \"$f\"",
             "sh \"$f\"",
-            "rc=$?",
-            "rm -f \"$f\"",
-            "exit $rc",
+            "exit $?",
+            ")",
         ].joined(separator: "; ")
     }
 

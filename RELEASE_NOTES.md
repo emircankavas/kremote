@@ -1,4 +1,4 @@
-## KRemote 1.8.0 beta 26
+## KRemote 1.8.0 beta 27
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -48,6 +48,20 @@ touching the shipped one. Open **KRemote ▸ Check for Updates…** and pick
 - A stable install never sees a `-beta` build.
 - Version ordering understands pre-releases: `1.8.0-beta.2 > 1.8.0-beta.1`, and
   `1.8.0` beats every beta of itself.
+
+### Fixed: running a snippet closed the SSH session
+
+The command ended with a bare `exit` to report the script's status. In the
+interactive login shell a snippet is written into, `exit` does not report a status —
+it terminates the shell, and the session with it. Running `whoami` disconnected the
+server.
+
+The command now runs inside a subshell, where `exit` ends only the subshell. Its
+cleanup also moved to a `trap`: the old trailing `rm` was skipped when a script was
+interrupted, leaving an executable copy of the script on the server.
+
+Verified by driving the shipped command through a real pty: the session survives,
+the script's output appears, and a script that exits 7 leaves `$?` at 7.
 
 ### New: snippets
 
@@ -387,7 +401,7 @@ com.apple.quarantine /Applications/KRemote.app` in Terminal.
 
 ### Please try
 
-1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.26 and install it.
+1. **Check for Updates…** on Beta: it should offer 1.8.0-beta.27 and install it.
 2. Right-click a connection → **Connect ▸ SFTP**: a window opens at the home
    directory, listing files. Check the breadcrumb, ⌘↑, and the list/icon switch.
 3. Open SFTP for the same connection again: it should raise the same window, not
