@@ -1,4 +1,4 @@
-## KRemote 1.9.0 beta 2
+## KRemote 1.9.0 beta 3
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -37,6 +37,14 @@ receives exactly what a local keyboard would have sent it.
 
 The button is disabled with fewer than two SSH sessions open: broadcasting to nothing is
 a mystery, not a feature.
+
+### Fixed: the broadcast button was invisible
+
+It used two SF Symbols that this version of macOS does not have, so the toolbar drew an
+empty circle that never changed colour — indistinguishable from a missing button. It now
+uses a symbol that exists and fills orange while broadcasting, and it keeps the toolbar's
+normal button framing so it sits in the same group as its neighbours rather than looking
+like a stray control.
 
 ### New: transfers, file operations and a permissions sheet
 

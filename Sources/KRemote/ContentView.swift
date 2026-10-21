@@ -138,21 +138,33 @@ struct SessionToolbarItems: View {
         SnippetMenuButton()
 
         // Multi-execution: mirror every keystroke into the other SSH sessions.
-        // Disabled outside split view because broadcasting to nothing is a mystery,
-        // not a feature.
+        //
+        // Drawn by hand rather than with `.toggleStyle(.button)`: the system's button
+        // toggle style did not show a pressed state in this toolbar, and the previous
+        // version swapped between two SF Symbols that do not exist on this OS — it
+        // rendered as an empty circle with no colour change at all. A filled background
+        // when on is the one thing a user cannot misread.
         Button {
             model.isBroadcasting.toggle()
         } label: {
-            Image(systemName: model.isBroadcasting
-                  ? "rectangle.split.2x1.fill.badge.minus"
-                  : "rectangle.split.2x1.fill.badge.plus")
+            Image(systemName: "keyboard.badge.ellipsis")
+                .foregroundStyle(model.isBroadcasting ? Color.white : Color.primary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(model.isBroadcasting ? Color.orange : Color.clear)
+                )
         }
+        // No `.plain`: that strips the toolbar's own button framing, which is what made
+        // this item look like it belonged to a different control group than its
+        // neighbours. The tint is supplied by the background instead.
         .help(model.isBroadcasting
-              ? "Stop sending typed input to every SSH session"
-              : "Send typed input to every SSH session")
-        .accessibilityLabel("Broadcast input")
-        .disabled(model.sessions.filter { model.find($0.nodeID)?.supportsSSH == true }.count < 2)
-        .foregroundStyle(model.isBroadcasting ? Color.orange : Color.primary)
+              ? "Every keystroke is going to all SSH sessions — click to stop"
+              : "Send every keystroke to all SSH sessions")
+        .accessibilityLabel("Broadcast input to all sessions")
+        .accessibilityValue(model.isBroadcasting ? "on" : "off")
+        .disabled(model.broadcastTargets.count < 2)
 
         Button {
             model.requestRoot()
