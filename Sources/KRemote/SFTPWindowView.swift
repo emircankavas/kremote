@@ -47,6 +47,12 @@ enum SFTPSortColumn: String, CaseIterable, Identifiable {
 ///
 /// Navigation shell only: transfers and file operations are the next card, so a
 /// double-click on a *file* is deliberately a no-op here.
+/// Identifiable wrapper so a path can drive `sheet(item:)`.
+private struct EditingPath: Identifiable {
+    let path: String
+    var id: String { path }
+}
+
 struct SFTPWindowView: View {
     let session: SFTPSession
 
@@ -54,6 +60,8 @@ struct SFTPWindowView: View {
     @AppStorage("sftpViewMode") private var viewModeRaw = SFTPViewMode.list.rawValue
     /// Hidden files stay per user as well, the way Finder remembers ⇧⌘..
     @AppStorage("sftpShowHidden") private var showHidden = false
+    /// Path of the file open in the embedded editor, if any.
+    @State private var editingPath: String?
 
     @State private var selection: Set<String> = []
     /// Where a ⇧-click range is measured from.
@@ -204,6 +212,15 @@ struct SFTPWindowView: View {
             }
             .sheet(item: $infoEntry) { entry in
                 infoSheet(entry, infoAttributes)
+            }
+            // `String` is not Identifiable; wrap the path so `sheet(item:)` can bind to
+            // it and so opening a second file replaces the first sheet rather than
+            // stacking one behind another.
+            .sheet(item: Binding(
+                get: { editingPath.map(EditingPath.init) },
+                set: { editingPath = $0?.path }
+            )) { target in
+                RemoteEditorView(session: session, path: target.path)
             }
             .confirmationDialog(
                 "“\(conflictName)” already exists",
@@ -855,11 +872,39 @@ struct SFTPWindowView: View {
         session.selectedPath = entry.path
         if entry.isDirectory {
             Task { await session.open(entry) }
+        } else if Self.isTextFile(entry.name) {
+            // A text file opens in the embedded editor. Downloading it and then
+            // hunting for an app to edit it is the step this feature exists to remove.
+            editingPath = entry.path
         } else {
-            // Double-clicking a file downloads it: there is no local app to hand a
-            // remote path to, and the card asks for double-click to act on files.
             download([entry])
         }
+    }
+
+    /// Whether double-clicking should open the editor rather than download.
+    ///
+    /// By extension, not by sniffing: reading every candidate's first block would make
+    /// a double-click on a large folder listing slow, and the extension is what the user
+    /// is already reading. Anything not listed still downloads, which is never wrong.
+    static func isTextFile(_ name: String) -> Bool {
+        let editable: Set<String> = [
+            "txt", "md", "markdown", "sh", "bash", "zsh", "fish", "conf", "cfg", "ini",
+            "yml", "yaml", "json", "toml", "xml", "html", "htm", "css", "scss", "js",
+            "ts", "py", "rb", "pl", "php", "go", "rs", "c", "h", "cpp", "hpp", "cc",
+            "swift", "java", "kt", "sql", "env", "properties", "service", "socket",
+            "repo", "list", "rules", "log", "csv", "tsv", "gradle", "dockerfile",
+            "gitignore", "editorconfig",
+        ]
+        let lower = name.lowercased()
+        if lower == "dockerfile" || lower == "makefile" || lower == ".env" { return true }
+        guard let dot = lower.lastIndex(of: ".") else { return false }
+        let ext = String(lower[lower.index(after: dot)...])
+        return editable.contains(ext)
+    }
+
+    /// Opens the editor for `entry`, from the context menu.
+    private func edit(_ entry: RemoteEntry) {
+        editingPath = entry.path
     }
 
     /// Drag-out: an item provider whose bytes are fetched only if the item is
@@ -884,6 +929,8 @@ struct SFTPWindowView: View {
 
         if entry.isDirectory {
             Button("Open") { open(entry) }
+        } else if Self.isTextFile(entry.name) {
+            Button("Edit") { edit(entry) }
         }
         Button(many ? "Download \(targets.count) Items…" : "Download…") { download(targets) }
         Button(many ? "Compress and Download \(targets.count) Items…" : "Compress and Download…") {

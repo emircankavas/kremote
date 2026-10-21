@@ -70,6 +70,27 @@ final class AppModel {
     /// Set to present a blank editor for a new snippet.
     var isCreatingSnippet = false
 
+    /// True while the multi-execution window is open.
+    var isMultiExecPresented = false
+
+    /// Runs a read-only diagnostic in the focused session.
+    ///
+    /// No confirmation: the catalogue is read-only by construction, and a dialog on
+    /// every `df -h` would teach people to dismiss dialogs. The command still goes
+    /// through the same marker + delivery path as a snippet, so the scrollback says
+    /// what ran.
+    func runTool(_ tool: RemoteTool) {
+        guard let session = focusedSession,
+              let node = find(session.nodeID), node.supportsSSH else {
+            lastError = "Tools run in an SSH session. Open one first."
+            return
+        }
+        snippetRequestCounter += 1
+        snippetTarget = session.id
+        snippetRequest = snippetRequestCounter
+        snippetCommand = "# KRemote tool: " + tool.name + "\n" + tool.command
+    }
+
     /// A snippet waiting for confirmation, and the session it would run on.
     ///
     /// Holding the *session* here rather than reading focus at run time matters: the

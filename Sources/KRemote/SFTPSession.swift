@@ -666,6 +666,41 @@ final class SFTPSession: Identifiable {
         return a < b ? .orderedAscending : .orderedDescending
     }
 
+    // MARK: - Embedded editor
+
+    /// Reads a file for the editor, with the metadata the conflict check needs.
+    ///
+    /// `readFile` and `stat` are separate round trips to the same path; a file edited
+    /// between them would carry an mtime from after the read, making the next save look
+    /// like somebody else's change. Reading first and then statting means the timestamp
+    /// is never older than the bytes, which fails safe: a spurious conflict prompt is
+    /// recoverable, a silent overwrite is not.
+    func loadFile(_ path: String) async throws -> (data: Data, size: UInt64?, modified: Date?) {
+        let data = try await client.readFile(path)
+        let attributes = try? await client.stat(path)
+        return (data, attributes?.size, attributes?.modified)
+    }
+
+    func fileInfo(_ path: String) async throws -> (size: UInt64?, modified: Date?) {
+        let attributes = try await client.stat(path)
+        return (attributes.size, attributes.modified)
+    }
+
+    /// Writes text back to the server.
+    ///
+    /// Permissions of an existing file are preserved: `writeFile` opens with 0o644 on
+    /// create, which would turn a 0600 key file into world-readable on save. The mode is
+    /// captured from the server first and restored afterwards.
+    func saveFile(_ path: String, text: String) async throws {
+        let existing = try? await client.stat(path)
+        try await client.writeFile(path, data: Data(text.utf8))
+        if let mode = existing?.permissions {
+            // Mode bits only: `st_mode` carries the file-type bits too, and setting
+            // those back is a permission change nobody asked for.
+            try? await client.setPermissions(path, permissions: UInt16(mode & 0o7777))
+        }
+    }
+
     // MARK: - Display helpers
 
     /// The server's own words where there are any — never a generic "failed".

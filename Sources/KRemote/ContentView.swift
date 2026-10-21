@@ -55,6 +55,9 @@ struct ContentView: View {
         .sheet(item: $model.editingSnippetID) { id in
             SnippetEditorView(snippetID: id) { model.editingSnippetID = nil }
         }
+        .sheet(isPresented: $model.isMultiExecPresented) {
+            MultiExecView()
+        }
         .fileImporter(
             isPresented: $model.isImportingConfCons,
             allowedContentTypes: [.xml],
@@ -136,6 +139,15 @@ struct SessionToolbarItems: View {
         .disabled(sftpTarget == nil)
 
         SnippetMenuButton()
+        RemoteToolsMenuButton()
+
+        Button {
+            model.isMultiExecPresented = true
+        } label: {
+            Image(systemName: "square.on.square.dashed")
+        }
+        .help("Run one command on several servers")
+        .accessibilityLabel("Run on several servers")
 
         Button {
             model.requestRoot()
