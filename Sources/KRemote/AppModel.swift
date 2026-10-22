@@ -427,6 +427,7 @@ final class AppModel {
     func addServer(_ target: AdHocTarget, protocol protocolName: RemoteProtocol) -> ConnectionNode {
         let node = AdHocConnection.makeNode(for: target, protocol: protocolName)
         insert(node, into: nil)
+        provisional.begin(node.id)
         selectedNodeID = node.id
         editingNodeID = node.id
         persist()
@@ -437,9 +438,21 @@ final class AppModel {
     func addConnection(inFolder folderID: ConnectionNode.ID?) {
         let connection = ConnectionNode(kind: .connection, name: "New Connection")
         insert(connection, into: folderID)
+        provisional.begin(connection.id)
         selectedNodeID = connection.id
         editingNodeID = connection.id
         persist()
+    }
+
+    /// Called when an editor closes without saving.
+    ///
+    /// A node created for a cancelled editor never really existed — leaving it behind
+    /// means every cancelled "New Connection" accumulates as an empty row in the sidebar.
+    /// Only nodes that were never saved are removed; an edit to an existing connection is
+    /// simply dropped, because the original is still there.
+    func discardIfUnsaved(_ id: ConnectionNode.ID) {
+        guard provisional.cancel(id) else { return }
+        delete(id)
     }
 
     private func insert(_ node: ConnectionNode, into folderID: ConnectionNode.ID?) {
@@ -488,6 +501,7 @@ final class AppModel {
     /// Applies an edited draft back to the tree and the Keychain.
     func apply(_ draft: ConnectionDraft) {
         guard let node = find(draft.id) else { return }
+        provisional.commit(draft.id)
         node.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
         node.host = draft.host.trimmingCharacters(in: .whitespacesAndNewlines)
         node.port = draft.port
@@ -670,6 +684,10 @@ final class AppModel {
     /// this map as a second source, which is all the tab, the SFTP window and the metrics
     /// badge ever need.
     private(set) var adHocNodes: [ConnectionNode.ID: ConnectionNode] = [:]
+
+    /// Nodes created for an editor that has not been saved yet, so that closing the
+    /// editor without saving can remove them.
+    private var provisional = ProvisionalNodes()
 
     /// Opens a session for a host that is not in the tree.
     ///

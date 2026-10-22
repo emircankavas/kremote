@@ -1,4 +1,4 @@
-## KRemote 1.9.0 beta 7
+## KRemote 1.9.0 beta 8
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -36,6 +36,16 @@ The search results also offer **Add "…" as a server**, which saves the address
 sidebar and opens the editor on it, pre-filled with the protocol, host, port and user you
 typed. Connecting ad hoc leaves no trace by design; this is for the address you intend to
 keep, so it does not make you type it twice.
+
+### Fixed: cancelling the editor left a record behind
+
+"Add as a server" and "New Connection" both created the node before the editor appeared,
+so Cancel kept it: dismissing the dialog still left a connection in the sidebar, and every
+cancelled "New Connection" added another empty row.
+
+A node created for an editor is now provisional until Save. Cancel — the button, Escape,
+or any other way the sheet closes — removes it. Editing a connection that was already in
+the tree and cancelling only drops the change, as before.
 
 ### New: edit remote files in place
 

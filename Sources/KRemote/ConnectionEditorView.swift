@@ -225,7 +225,12 @@ struct ConnectionEditorView: View {
                     .lineLimit(1)
             }
             Spacer()
-            Button("Cancel", role: .cancel, action: onClose)
+            // Cancel means cancel: a node created for this editor and never saved is
+            // removed, so a dismissed "New Connection" leaves nothing behind.
+            Button("Cancel", role: .cancel) {
+                model.discardIfUnsaved(nodeID)
+                onClose()
+            }
                 .keyboardShortcut(.cancelAction)
             Button("Save", action: save)
                 .keyboardShortcut(.defaultAction)

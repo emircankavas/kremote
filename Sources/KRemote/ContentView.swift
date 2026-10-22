@@ -7,6 +7,9 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
 
     @State private var pendingPassphrase = ""
+    /// Remembered so the sheet's `onDismiss` knows which node was being edited: by then
+    /// `editingNodeID` is already nil.
+    @State private var lastEditorNodeID: ConnectionNode.ID?
     @State private var showImportNotice = false
 
     var body: some View {
@@ -38,8 +41,15 @@ struct ContentView: View {
                 SessionToolbarItems()
             }
         }
-        .sheet(item: $model.editingNodeID) { id in
+        .sheet(item: $model.editingNodeID, onDismiss: {
+            // Escape and the sheet's own close path skip the Cancel button, so the
+            // discard also runs here. It is idempotent: the button removes the id first,
+            // and this finds nothing left to remove.
+            if let id = lastEditorNodeID { model.discardIfUnsaved(id) }
+            lastEditorNodeID = nil
+        }) { id in
             ConnectionEditorView(nodeID: id) { model.editingNodeID = nil }
+                .onAppear { lastEditorNodeID = id }
         }
         // Confirmation comes before execution: a snippet is code, and the menu is one
         // click from a production server.
