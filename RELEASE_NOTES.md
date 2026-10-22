@@ -1,8 +1,28 @@
-## KRemote 1.9.0 beta 8
+## KRemote 1.9.0 beta 9
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
 `confCons.xml` import.
+
+### Changed: the sidebar shows addresses, not tree positions
+
+A connection's second line is now its address — `user@host`, with the port only when it is
+not the protocol's default — instead of where it sits in the tree. Scanning a list of
+servers, the address is the thing being looked for; the folder a connection lives in was
+answering a question nobody was asking. Search results still append the folder after the
+address, so two entries with the same address stay distinguishable.
+
+### Changed: SSH and RDP have different icons
+
+Every connection used one terminal glyph, which hid the distinction that decides what
+double-clicking opens. SSH keeps the terminal; RDP gets a display.
+
+### New: copy a username or password from the context menu
+
+Right-clicking a connection — or a folder, which holds the group default its members
+inherit — offers **Copy Username** and **Copy Password**. Copying a login beats opening the
+editor to read it. An item is disabled when there is nothing to copy, and no dialog
+interrupts the paste that is about to happen.
 
 ### New: connect straight from the search field
 

@@ -248,9 +248,36 @@ struct SidebarView: View {
             Button("Open in New Tab") { model.open(node, newTab: true) }
             Divider()
         }
+        Divider()
+        // Credentials are the thing people reach for the context menu for: copying a
+        // login name or a password beats reading it out of the editor. Offered for
+        // folders too, where the value is the group default the members inherit.
+        Button("Copy Username") {
+            copy(model.copyableUsername(for: node.id))
+        }
+        .disabled(model.copyableUsername(for: node.id) == nil)
+
+        Button("Copy Password") {
+            copy(model.copyablePassword(for: node.id))
+        }
+        .disabled(model.copyablePassword(for: node.id) == nil)
+
+        Divider()
         Button("Edit…") { model.editingNodeID = node.id }
         Button("Rename…") { beginRename(node) }
         Button("Delete", role: .destructive) { deleteTarget = node.id }
+    }
+
+    /// Puts text on the general pasteboard.
+    ///
+    /// Nothing else happens: no history, no confirmation dialog. Copying a password to
+    /// paste it into a login prompt is the whole point, and a dialog would make the
+    /// obvious thing slower than selecting the text by hand.
+    private func copy(_ text: String?) {
+        guard let text, !text.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 
     private func openSFTP(_ node: ConnectionNode) {
@@ -276,7 +303,10 @@ private struct NodeRow: View {
         let effective = model.effective(node.id)
 
         HStack(spacing: 6) {
-            Image(systemName: node.isFolder ? "folder" : "terminal")
+            // The icon says how this entry is reached: a folder, a shell, or a remote
+            // desktop. One terminal glyph for every connection hides the distinction
+            // that decides what double-clicking does.
+            Image(systemName: rowSymbol)
                 .foregroundStyle(node.isFolder ? Color.accentColor : .secondary)
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 1) {
@@ -294,25 +324,40 @@ private struct NodeRow: View {
         .onTapGesture(count: 2) { model.open(node) }
     }
 
-    /// On search results the folder path is shown first (so a deep host is
-    /// locatable); otherwise just the resolved connection summary.
-    private func subtitleText(_ effective: EffectiveConnection?) -> String? {
-        let connection = effective?.summary
-        if showsPath, let path = pathText {
-            if let connection, connection != "not configured" { return "\(path) · \(connection)" }
-            return path
-        }
-        return connection
+    /// The icon for this row.
+    ///
+    /// RDP gets its own glyph rather than a variant of the terminal one: the two open
+    /// completely different windows, so telling them apart at a glance is the point.
+    private var rowSymbol: String {
+        if node.isFolder { return "folder" }
+        return node.supportsRDP ? "display" : "terminal"
     }
 
-    private var pathText: String? {
-        guard showsPath else { return nil }
+    /// The address, first: it is what a connection *is*.
+    ///
+    /// This used to show the tree path on search results, which answered "where in the
+    /// sidebar is this?" — a question nobody asks while searching for a host. The address
+    /// is the thing being looked for, so it leads; the folder is still shown after it, so
+    /// two entries with the same address in different folders stay distinguishable.
+    private func subtitleText(_ effective: EffectiveConnection?) -> String? {
+        guard let effective,
+              let address = ConnectionSubtitle.address(
+                host: effective.host,
+                username: effective.username,
+                port: effective.port,
+                protocolName: effective.protocolName
+              )
+        else { return nil }
+        return ConnectionSubtitle.address(address, path: showsPath ? (pathComponents ?? []) : [])
+    }
+
+    private var pathComponents: [String]? {
         var parts: [String] = []
         var current = ConnectionNode.parentID(of: node.id, in: model.roots)
         while let id = current, let parent = model.find(id) {
             parts.insert(parent.name, at: 0)
             current = ConnectionNode.parentID(of: id, in: model.roots)
         }
-        return parts.isEmpty ? nil : parts.joined(separator: " ▸ ")
+        return parts.isEmpty ? nil : parts
     }
 }

@@ -489,6 +489,26 @@ final class AppModel {
         persist()
     }
 
+    // MARK: - Copying credentials
+
+    /// The username this node logs in with, own or inherited from a folder.
+    func copyableUsername(for id: ConnectionNode.ID) -> String? {
+        hydrateCredentials(for: id)
+        guard let username = effective(id)?.username, !username.isEmpty else { return nil }
+        return username
+    }
+
+    /// The password this node logs in with, own or inherited from a folder.
+    ///
+    /// Secrets are loaded lazily, so they are hydrated first — otherwise a password that
+    /// is stored but not yet read would look like no password at all, and the menu item
+    /// would be disabled for no reason.
+    func copyablePassword(for id: ConnectionNode.ID) -> String? {
+        hydrateCredentials(for: id)
+        guard let password = effective(id)?.password, !password.isEmpty else { return nil }
+        return password
+    }
+
     // MARK: - Editing
 
     func draft(for id: ConnectionNode.ID) -> ConnectionDraft? {
