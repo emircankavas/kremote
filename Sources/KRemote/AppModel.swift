@@ -416,6 +416,24 @@ final class AppModel {
         persist()
     }
 
+    /// Saves a typed host into the tree and opens the editor on it.
+    ///
+    /// The difference from `connectAdHoc` is intent: that one is a session that leaves no
+    /// trace, this one is the user saying "I will want this again". It arrives
+    /// pre-filled with what was typed, so the editor is a review step rather than a form
+    /// to fill from scratch — typing the address twice is the sort of thing that makes
+    /// people give up on an app.
+    @discardableResult
+    func addServer(_ target: AdHocTarget, protocol protocolName: RemoteProtocol) -> ConnectionNode {
+        let node = AdHocConnection.makeNode(for: target, protocol: protocolName)
+        insert(node, into: nil)
+        selectedNodeID = node.id
+        editingNodeID = node.id
+        persist()
+        searchQuery = ""
+        return node
+    }
+
     func addConnection(inFolder folderID: ConnectionNode.ID?) {
         let connection = ConnectionNode(kind: .connection, name: "New Connection")
         insert(connection, into: folderID)

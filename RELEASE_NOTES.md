@@ -1,4 +1,4 @@
-## KRemote 1.9.0 beta 6
+## KRemote 1.9.0 beta 7
 
 Native macOS remote connection manager — RDP and SSH sessions side by side, a
 connection tree with folder credential inheritance and mRemoteNG
@@ -29,6 +29,13 @@ is the answer for an address the app already knows.
 
 The protocol chevron was a bare untinted glyph, which on a dark sidebar was almost
 invisible. It is now accent-tinted on a light accent background.
+
+### New: Add a typed host as a server
+
+The search results also offer **Add "…" as a server**, which saves the address to the
+sidebar and opens the editor on it, pre-filled with the protocol, host, port and user you
+typed. Connecting ad hoc leaves no trace by design; this is for the address you intend to
+keep, so it does not make you type it twice.
 
 ### New: edit remote files in place
 

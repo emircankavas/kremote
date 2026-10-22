@@ -82,8 +82,10 @@ struct SidebarView: View {
             }
             Spacer()
             Menu {
-                Button("SSH") { model.connectAdHoc(target, protocol: .ssh) }
-                Button("RDP") { model.connectAdHoc(target, protocol: .rdp) }
+                Button("Connect with SSH") { model.connectAdHoc(target, protocol: .ssh) }
+                Button("Connect with RDP") { model.connectAdHoc(target, protocol: .rdp) }
+                Divider()
+                Button("Add server…") { model.addServer(target, protocol: .ssh) }
             } label: {
                 // Bordered and tinted rather than a bare glyph: an untinted chevron in a
                 // sidebar row is nearly invisible on a dark background, which is exactly
@@ -101,12 +103,36 @@ struct SidebarView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .help("Choose SSH or RDP")
+            .help("Connect, or add this server")
         }
         .contentShape(Rectangle())
         // The whole row opens SSH: it is the common case, and requiring a menu for the
         // default would be a click for nothing. The chevron picks the other protocol.
         .onTapGesture { model.connectAdHoc(target, protocol: .ssh) }
+    }
+
+    /// "Add … as a server", as its own row.
+    ///
+    /// The same action sits in the connect row's menu, but a menu is where features go to
+    /// be undiscovered: saving a host is the thing a user wants when they type an address
+    /// they intend to keep, so it earns a visible row of its own.
+    @ViewBuilder
+    private func addServerRow(_ target: AdHocTarget) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "plus.rectangle.on.folder")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Add “\(target.displayLabel)” as a server")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("Save it to the sidebar")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { model.addServer(target, protocol: .ssh) }
     }
 
     // MARK: - Tree / results
@@ -140,6 +166,7 @@ struct SidebarView: View {
                     }
                     if let adHoc {
                         adHocRow(adHoc)
+                        addServerRow(adHoc)
                     }
                 }
                 .listStyle(.sidebar)
