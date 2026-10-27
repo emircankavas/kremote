@@ -24,11 +24,11 @@ struct ContentView: View {
             // session buttons, which capped them at ~720 pt and hid the sixth
             // session behind a horizontal scroll.
             VStack(spacing: 0) {
-                if !model.sessions.isEmpty {
-                    TabStrip()
-                        .frame(height: 34)
-                    Divider()
-                }
+                // Always drawn, even with no sessions: the strip's "+" is the
+                // browser-shaped way to start the first one.
+                TabStrip()
+                    .frame(height: 34)
+                Divider()
                 DetailView()
             }
         }
