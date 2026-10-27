@@ -369,6 +369,19 @@ private struct NodeRow: View {
             }
         }
         .contentShape(Rectangle())
+        // Until now a drag over a row looked exactly like a drag over empty space,
+        // so there was no way to tell whether the row would take the drop.
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(model.dropHighlightID == node.id
+                      ? Color.accentColor.opacity(0.18)
+                      : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 5)
+                .strokeBorder(model.dropHighlightID == node.id ? Color.accentColor : Color.clear,
+                              lineWidth: 1.5)
+        )
         .onTapGesture(count: 2) { model.open(node) }
     }
 
