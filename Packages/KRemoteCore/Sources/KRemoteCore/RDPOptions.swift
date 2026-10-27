@@ -55,6 +55,42 @@ public enum RDPResolutionMode: String, Codable, Sendable, CaseIterable {
     }
 }
 
+/// How the remote desktop's pixel grid relates to the pane it is shown in.
+///
+/// The RDP desktop used to be requested in *backing* pixels (2× on a Retina
+/// display) while the server was told the scale factor was 100%, so Windows
+/// rendered a 1× UI into a 2× surface: correct on a normal monitor, unreadable
+/// on a MacBook. The fix is a choice, because the two goals conflict:
+///
+///  * `.matchDisplay` — the desktop is the pane's size in *points*, so Windows'
+///    100% UI has exactly the physical size it has on a 1× display. Text is
+///    displayed 1:1 in points and is perfectly readable; on a Retina panel the
+///    image is upscaled 2× by the compositor, so it is not pixel-sharp.
+///  * `.native` — the desktop is the pane's size in backing pixels and the
+///    server is told to render at 180% (the largest value the Display Control
+///    channel accepts). Text is drawn by Windows at 1.8× and shown at half size:
+///    crisp, and still readable (0.9× of a normal display's text).
+public enum RDPDesktopMode: String, Codable, Sendable, CaseIterable {
+    case matchDisplay = "MatchDisplay"
+    case native = "Native"
+
+    public var displayName: String {
+        switch self {
+        case .matchDisplay: return "Match panel (readable)"
+        case .native: return "Native pixels (crisp)"
+        }
+    }
+
+    /// The scale factor announced to the server. Display Control only accepts
+    /// 100, 140 and 180 — anything else makes the client core data invalid.
+    public var wireScaleFactor: Int {
+        switch self {
+        case .matchDisplay: return 100
+        case .native: return 180
+        }
+    }
+}
+
 /// RDP-specific overrides set directly on a node.
 ///
 /// Every field is optional and `nil` means "inherit from the parent folder",
@@ -73,6 +109,10 @@ public struct RDPSettings: Equatable, Sendable, Codable {
     public var redirectPrinters: Bool?
     public var redirectSound: Bool?
     public var redirectKeys: Bool?
+    /// How the desktop maps onto the pane's pixels (Retina readability).
+    public var desktopMode: RDPDesktopMode?
+    /// Reverses the RDP wheel direction on top of macOS' own scroll setting.
+    public var invertScroll: Bool?
 
     public init(
         domain: String? = nil,
@@ -84,7 +124,9 @@ public struct RDPSettings: Equatable, Sendable, Codable {
         redirectDrives: Bool? = nil,
         redirectPrinters: Bool? = nil,
         redirectSound: Bool? = nil,
-        redirectKeys: Bool? = nil
+        redirectKeys: Bool? = nil,
+        desktopMode: RDPDesktopMode? = nil,
+        invertScroll: Bool? = nil
     ) {
         self.domain = domain
         self.resolution = resolution
@@ -96,6 +138,8 @@ public struct RDPSettings: Equatable, Sendable, Codable {
         self.redirectPrinters = redirectPrinters
         self.redirectSound = redirectSound
         self.redirectKeys = redirectKeys
+        self.desktopMode = desktopMode
+        self.invertScroll = invertScroll
     }
 
     /// True when nothing is set, so `nil` folders are not written to disk.
@@ -104,6 +148,7 @@ public struct RDPSettings: Equatable, Sendable, Codable {
     private enum CodingKeys: String, CodingKey {
         case domain, resolution, customWidth, customHeight, colorDepth
         case redirectClipboard, redirectDrives, redirectPrinters, redirectSound, redirectKeys
+        case desktopMode, invertScroll
     }
 
     /// Only the fields that are actually set are written, keeping the JSON (and
@@ -120,6 +165,8 @@ public struct RDPSettings: Equatable, Sendable, Codable {
         try container.encodeIfPresent(redirectPrinters, forKey: .redirectPrinters)
         try container.encodeIfPresent(redirectSound, forKey: .redirectSound)
         try container.encodeIfPresent(redirectKeys, forKey: .redirectKeys)
+        try container.encodeIfPresent(desktopMode, forKey: .desktopMode)
+        try container.encodeIfPresent(invertScroll, forKey: .invertScroll)
     }
 
     /// Tolerant decode: a malformed `resolution` falls back to the mode names'
@@ -141,6 +188,10 @@ public struct RDPSettings: Equatable, Sendable, Codable {
         self.redirectPrinters = try container.decodeIfPresent(Bool.self, forKey: .redirectPrinters)
         self.redirectSound = try container.decodeIfPresent(Bool.self, forKey: .redirectSound)
         self.redirectKeys = try container.decodeIfPresent(Bool.self, forKey: .redirectKeys)
+        // Decoded leniently: a value written by a newer build must degrade to
+        // "inherit" rather than failing the whole settings block.
+        self.desktopMode = (try? container.decodeIfPresent(RDPDesktopMode.self, forKey: .desktopMode)) ?? nil
+        self.invertScroll = try container.decodeIfPresent(Bool.self, forKey: .invertScroll)
     }
 }
 
@@ -157,6 +208,12 @@ public struct RDPOptions: Equatable, Sendable {
     public var redirectPrinters: Bool
     public var redirectSound: Bool
     public var redirectKeys: Bool
+    /// Retina readability: panel-sized desktop at 100%, or backing-pixel desktop
+    /// at 180%.
+    public var desktopMode: RDPDesktopMode
+    /// Reverses the wheel direction on top of whatever macOS's "natural
+    /// scrolling" setting already does.
+    public var invertScroll: Bool
 
     public init(
         domain: String = "",
@@ -168,7 +225,9 @@ public struct RDPOptions: Equatable, Sendable {
         redirectDrives: Bool = false,
         redirectPrinters: Bool = false,
         redirectSound: Bool = true,
-        redirectKeys: Bool = false
+        redirectKeys: Bool = false,
+        desktopMode: RDPDesktopMode = .matchDisplay,
+        invertScroll: Bool = false
     ) {
         self.domain = domain
         self.resolution = resolution
@@ -180,6 +239,8 @@ public struct RDPOptions: Equatable, Sendable {
         self.redirectPrinters = redirectPrinters
         self.redirectSound = redirectSound
         self.redirectKeys = redirectKeys
+        self.desktopMode = desktopMode
+        self.invertScroll = invertScroll
     }
 
     /// What a root node starts from before any folder contributes.
@@ -204,6 +265,39 @@ public struct RDPOptions: Equatable, Sendable {
         }
     }
 
+    /// The desktop to ask the server for, given the pane's size in points and the
+    /// display's backing scale, plus the scale factor to announce with it.
+    ///
+    /// `desktopMode` is the whole point of this function: the pane's *points* are
+    /// what Windows' 100% UI should occupy, and the backing pixels are how many of
+    /// them the panel really has. Requesting backing pixels while announcing 100%
+    /// is the combination that made a Retina MacBook unreadable.
+    ///
+    /// An explicit custom size is honoured exactly and never multiplied: the user
+    /// named a pixel count, so guessing a scale on top of it would contradict it.
+    public func desktopRequest(
+        panePoints: CGSize,
+        backingScale: CGFloat
+    ) -> (width: Int, height: Int, scaleFactor: Int) {
+        if let explicit = explicitDesktopSize {
+            return (explicit.width, explicit.height, 100)
+        }
+        let scale = backingScale > 0 ? backingScale : 1
+        let points = (max(1, Int(panePoints.width.rounded())), max(1, Int(panePoints.height.rounded())))
+        switch desktopMode {
+        case .matchDisplay:
+            return (points.0, points.1, 100)
+        case .native:
+            // On a 1x display "native" and "match display" are the same grid, and
+            // announcing 180% there would blow the UI up for nothing. Only a
+            // genuinely high-density panel gets the doubled grid.
+            guard scale >= 1.5 else { return (points.0, points.1, 100) }
+            return (Int((Double(points.0) * scale).rounded()),
+                    Int((Double(points.1) * scale).rounded()),
+                    RDPDesktopMode.native.wireScaleFactor)
+        }
+    }
+
     /// Folds `settings` over what was inherited; a `nil` field keeps `base`.
     public func merging(_ settings: RDPSettings) -> RDPOptions {
         var merged = self
@@ -217,12 +311,15 @@ public struct RDPOptions: Equatable, Sendable {
         if let value = settings.redirectPrinters { merged.redirectPrinters = value }
         if let value = settings.redirectSound { merged.redirectSound = value }
         if let value = settings.redirectKeys { merged.redirectKeys = value }
+        if let mode = settings.desktopMode { merged.desktopMode = mode }
+        if let value = settings.invertScroll { merged.invertScroll = value }
         return merged
     }
 
     /// One-line description for the editor footer and the pane status bar.
     public var summary: String {
         var parts = ["\(resolution.displayName)", "\(colorDepth)-bit"]
+        if desktopMode != .matchDisplay { parts.append(desktopMode.displayName) }
         if resolution == .custom { parts[0] = "\(resolution.displayName) \(customWidth)×\(customHeight)" }
         var redirects: [String] = []
         if redirectClipboard { redirects.append("clipboard") }
@@ -274,6 +371,13 @@ extension RDPSettings {
         settings.redirectSound = Self.bool(fromConfCons: attributes["RedirectSound"])
             ?? Self.bool(fromConfCons: attributes["RedirectAudio"])
         settings.redirectKeys = Self.bool(fromConfCons: attributes["RedirectKeys"])
+        // No mRemoteNG attribute exists for these two; they are KRemote's own and
+        // are written with KRemote* keys so a round-trip through mRemoteNG does not
+        // silently reset them to the default.
+        if let raw = attributes["KRemoteDesktopMode"] {
+            settings.desktopMode = RDPDesktopMode(rawValue: raw)
+        }
+        settings.invertScroll = Self.bool(fromConfCons: attributes["KRemoteInvertScroll"])
 
         return settings
     }
@@ -320,6 +424,8 @@ extension RDPSettings {
         if let redirectPrinters { attributes.append(("RedirectPrinters", "\(redirectPrinters)")) }
         if let redirectSound { attributes.append(("RedirectSound", "\(redirectSound)")) }
         if let redirectKeys { attributes.append(("RedirectKeys", "\(redirectKeys)")) }
+        if let desktopMode { attributes.append(("KRemoteDesktopMode", desktopMode.rawValue)) }
+        if let invertScroll { attributes.append(("KRemoteInvertScroll", "\(invertScroll)")) }
         return attributes
     }
 }

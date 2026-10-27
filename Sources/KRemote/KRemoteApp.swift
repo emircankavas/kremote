@@ -79,6 +79,25 @@ struct KRemoteApp: App {
                 .keyboardShortcut("i", modifiers: [.command, .shift])
             }
             CommandMenu("Session") {
+                // ⌘1…⌘9 select a tab by position, as a browser does.
+                ForEach(1...9, id: \.self) { number in
+                    Button("Tab \(number)") { model.activateTab(number: number) }
+                        .keyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: .command)
+                        .disabled(model.sessions.count < number)
+                }
+                Divider()
+                Button("Next Tab") { model.activateAdjacentTab(offset: 1) }
+                    .keyboardShortcut("]", modifiers: [.command, .shift])
+                    .disabled(model.sessions.count < 2)
+                Button("Previous Tab") { model.activateAdjacentTab(offset: -1) }
+                    .keyboardShortcut("[", modifiers: [.command, .shift])
+                    .disabled(model.sessions.count < 2)
+                Button("Close Tab") {
+                    if let id = model.activeSessionID { model.closeSession(id) }
+                }
+                .keyboardShortcut("w", modifiers: .command)
+                .disabled(model.activeSessionID == nil)
+                Divider()
                 Button("Toggle Split View") {
                     model.setSplit(!model.splitMode, panes: model.splitMode ? nil : 2)
                 }

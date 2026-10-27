@@ -56,6 +56,11 @@ typedef struct {
     int width;              // desktop width to request
     int height;             // desktop height to request
     int color_depth;        // 8, 16, 24 or 32
+    /// Scale factor announced to the server through Display Control, in percent.
+    /// Only 100, 140 and 180 are valid; 0 means 100. This is what makes a
+    /// backing-pixel desktop readable: the desktop is 2x the panel's points and
+    /// Windows draws its UI at 180%.
+    int desktop_scale_factor;
     bool ignore_certificate;
     bool redirect_clipboard;
     bool redirect_drives;
@@ -122,8 +127,10 @@ void krdp_client_mouse(krdp_client* client, int x, int y, int button, bool is_do
 /// Sends a mouse move with no button.
 void krdp_client_mouse_move(krdp_client* client, int x, int y);
 
-/// Sends a vertical/horizontal wheel delta (in RDP wheel units).
-void krdp_client_scroll(krdp_client* client, int delta_x, int delta_y);
+/// Sends a vertical/horizontal wheel movement in whole notches: +1 is one notch
+/// up/right, -1 down/left. The bridge converts that to the 120-unit rotation
+/// value RDP carries.
+void krdp_client_scroll(krdp_client* client, int notch_x, int notch_y);
 
 /// Sends a key event. `scancode` is a PC set-1 make code; `extended` marks
 /// the 0xE0-prefixed variants (arrows, right ctrl/alt, numpad enter...).

@@ -19,7 +19,18 @@ struct ContentView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 280, max: 460)
         } detail: {
-            DetailView()
+            // Tabs in their own row, full width, under the title bar. In the
+            // toolbar they shared the strip with the window controls and the
+            // session buttons, which capped them at ~720 pt and hid the sixth
+            // session behind a horizontal scroll.
+            VStack(spacing: 0) {
+                if !model.sessions.isEmpty {
+                    TabStrip()
+                        .frame(height: 34)
+                    Divider()
+                }
+                DetailView()
+            }
         }
         .navigationTitle("KRemote")
         // One place turns "show SFTP for a node" into a window. `openWindow` with
@@ -31,12 +42,6 @@ struct ContentView: View {
             }
         }
         .toolbar {
-            // Tabs centred in the window's title bar — the layout that worked.
-            ToolbarItem(placement: .principal) {
-                if !model.sessions.isEmpty {
-                    TabStrip()
-                }
-            }
             ToolbarItemGroup(placement: .primaryAction) {
                 SessionToolbarItems()
             }

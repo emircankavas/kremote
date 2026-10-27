@@ -12,9 +12,8 @@ struct DetailView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        // The tab strip lives in the window toolbar (see `ContentView`), so the
-        // detail area is just the session surface. Chrome-style: tabs share the
-        // title bar with the window controls instead of taking a row of their own.
+        // The tab strip is drawn by `ContentView` above this view, in its own row
+        // under the title bar, so the detail area is just the session surface.
         if model.sessions.isEmpty {
             PlaceholderView()
         } else {
@@ -23,42 +22,211 @@ struct DetailView: View {
     }
 }
 
-// MARK: - Tab strip (lives in the window toolbar)
+// MARK: - Tab strip
 
-/// The session tabs, shown in the window's title bar.
+/// The session tabs, drawn in their own row under the title bar.
 ///
-/// Sized for a toolbar rather than a content row: shorter padding, and each tab
-/// is capped so a long title cannot push its neighbours out of view.
+/// Browser behaviour, deliberately: the tabs share the strip's full width, shrink
+/// together as more open (down to `TabStripLayout.minWidth`, then icon-only),
+/// spill the ones that no longer fit into an overflow menu, and end in a "+".
+/// The previous version lived in the window toolbar with a 720 pt cap and a fixed
+/// 180 pt per tab, so past five sessions the rest simply scrolled out of sight.
+///
+/// A `GeometryReader` measures the width once per layout and `TabStripLayout` does
+/// the arithmetic (in the core, with tests); the view only draws the answer.
 struct TabStrip: View {
     @Environment(AppModel.self) private var model
+    /// Insertion index a tab drag is hovering, for the drop indicator.
+    @State private var dropIndex: Int?
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 2) {
-                ForEach(model.sessions) { session in
-                    TabButton(
-                        session: session,
-                        label: model.tabLabel(for: session.id),
-                        isActive: session.id == model.activeSessionID
-                    ) {
-                        model.activateTab(session.id)
-                    } onClose: {
-                        model.closeSession(session.id)
+        GeometryReader { geometry in
+            let layout = TabStripLayout(count: model.sessions.count, available: geometry.size.width - 34)
+            HStack(spacing: TabStripLayout.gap) {
+                ForEach(Array(model.sessions.enumerated()), id: \.element.id) { index, session in
+                    if index < layout.visibleCount {
+                        TabButton(
+                            session: session,
+                            label: model.tabLabel(for: session.id),
+                            isActive: session.id == model.activeSessionID,
+                            width: layout.tabWidth,
+                            compact: layout.showsOnlyIcon
+                        ) {
+                            model.activateTab(session.id)
+                        } onClose: {
+                            model.closeSession(session.id)
+                        }
+                        .onDrag {
+                            TabDrag.begin(session.id)
+                            return NodeDragPayload.provider(for: [session.id])
+                        } preview: {
+                            Label(model.tabLabel(for: session.id), systemImage: "terminal")
+                                .padding(4)
+                        }
+                        .onDrop(
+                            of: [.kremoteNode],
+                            delegate: TabDropDelegate(
+                                model: model,
+                                destination: { index },
+                                isTargeted: { targeted in
+                                    if targeted {
+                                        dropIndex = index
+                                    } else if dropIndex == index {
+                                        dropIndex = nil
+                                    }
+                                }
+                            )
+                        )
+                        // The indicator sits *before* this tab, so dropping on it
+                        // reads as "put it here" without a separate hit area.
+                        .overlay(alignment: .leading) {
+                            if dropIndex == index {
+                                Rectangle()
+                                    .fill(Color.accentColor)
+                                    .frame(width: 2)
+                                    .offset(x: -1)
+                                    .allowsHitTesting(false)
+                            }
+                        }
                     }
                 }
+
+                if layout.overflowCount > 0 {
+                    OverflowTabsButton(count: layout.overflowCount)
+                }
+
+                Spacer(minLength: 0)
+
+                newTabButton
             }
-            .padding(.horizontal, 2)
+            .padding(.horizontal, 4)
+            .frame(maxHeight: .infinity)
+            // A drop past the last visible tab means "move to the end".
+            .onDrop(
+                of: [.kremoteNode],
+                delegate: TabDropDelegate(
+                    model: model,
+                    destination: { model.sessions.count },
+                    isTargeted: { _ in dropIndex = nil }
+                )
+            )
         }
-        .frame(maxWidth: 720)
+        .background(.bar)
+    }
+
+    /// Browser's "+": open the sidebar's selection, or start a new connection in
+    /// the selected folder — the same thing `⇧⌘N` does.
+    private var newTabButton: some View {
+        Button {
+            if let node = model.selectedNode, node.isOpenable {
+                model.open(node, newTab: true)
+            } else {
+                model.addConnection(inFolder: model.selectedFolderID)
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 24, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Open the selected connection in a new tab, or create one (⇧⌘N)")
+        .accessibilityLabel("New tab")
     }
 }
 
+/// The tabs that no longer fit, as a menu.
+private struct OverflowTabsButton: View {
+    @Environment(AppModel.self) private var model
+    let count: Int
+
+    var body: some View {
+        Menu {
+            ForEach(model.sessions) { session in
+                Button {
+                    model.activateTab(session.id)
+                } label: {
+                    if session.id == model.activeSessionID {
+                        Label(model.tabLabel(for: session.id), systemImage: "checkmark")
+                    } else {
+                        Text(model.tabLabel(for: session.id))
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 2) {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                Text("\(count)")
+                    .font(.caption)
+            }
+            .padding(.horizontal, 6)
+            .frame(height: 22)
+            .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.08)))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("\(count) more open sessions")
+        .accessibilityLabel("\(count) more open sessions")
+    }
+}
+
+/// The tab currently being dragged along the strip.
+///
+/// Same reasoning as `NodeDrag`: `performDrop` answers AppKit synchronously and a
+/// pasteboard payload loads asynchronously, so a drag inside this app is recorded
+/// when it starts rather than decoded when it is dropped.
+@MainActor
+enum TabDrag {
+    private(set) static var id: Session.ID?
+
+    static func begin(_ id: Session.ID) { self.id = id }
+    static func finish() { id = nil }
+}
+
+/// Reorders the tabs when a tab is dropped between two tabs.
+struct TabDropDelegate: DropDelegate {
+    let model: AppModel
+    /// The insertion index the drop means.
+    let destination: () -> Int
+    let isTargeted: (Bool) -> Void
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.kremoteNode])
+    }
+
+    func dropEntered(info: DropInfo) { isTargeted(true) }
+    func dropExited(info: DropInfo) { isTargeted(false) }
+
+    func performDrop(info: DropInfo) -> Bool {
+        isTargeted(false)
+        guard info.hasItemsConforming(to: [.kremoteNode]), let id = TabDrag.id else { return false }
+        defer { TabDrag.finish() }
+        guard let source = model.sessions.firstIndex(where: { $0.id == id }) else { return false }
+        // The insertion index counts the dragged tab while it is still in the
+        // array, so a drop to its right means one position earlier once it is
+        // removed — `TabOrdering.move` takes the post-removal index.
+        var target = destination()
+        if target > source { target -= 1 }
+        model.moveTab(id, to: target)
+        return true
+    }
+}
+
+/// One tab.
+///
+/// The width is handed in by the strip, so tabs share the space evenly instead of
+/// each claiming a fixed cap. In compact mode only the icon and close button are
+/// drawn: a title truncated to two characters is less useful than the icon.
 private struct TabButton: View {
     let session: Session
     /// The label to show: the connection's name, with a trailing number when the
     /// same connection is open more than once.
     let label: String
     let isActive: Bool
+    let width: CGFloat
+    let compact: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
 
@@ -68,21 +236,23 @@ private struct TabButton: View {
         HStack(spacing: 5) {
             Image(systemName: "terminal")
                 .font(.caption2)
-            Text(label)
-                .font(.caption)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            if !compact {
+                Text(label)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+            }
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 8, weight: .bold))
             }
             .buttonStyle(.plain)
             .opacity(isHovering || isActive ? 1 : 0)
-            .help("Close tab")
+            .help("Close tab (⌘W)")
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .frame(maxWidth: 180)
+        .frame(width: width, height: 22)
         .background(
             RoundedRectangle(cornerRadius: 5)
                 .fill(isActive ? Color.accentColor.opacity(0.22) : Color.clear)
@@ -90,6 +260,10 @@ private struct TabButton: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }
+        .help(label)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(isActive ? [.isSelected] : [])
     }
 }
 

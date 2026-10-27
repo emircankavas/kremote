@@ -177,30 +177,78 @@ struct SidebarView: View {
                     NodeRow(node: node)
                         .tag(node.id)
                         .contextMenu { menu(for: node) }
-                        .draggable(node.id.uuidString) {
+                        // `.onDrag` with an explicit NSItemProvider, not
+                        // `.draggable`: on a `List` row the Transferable variant
+                        // never started a drag at all (the row answered with a
+                        // plain text item that AppKit's text services claimed),
+                        // and a private UTI is also what keeps a drop from
+                        // accepting text dragged in from another app.
+                        .onDrag {
+                            NodeDrag.begin([node.id])
+                            return NodeDragPayload.provider(for: [node.id])
+                        } preview: {
                             Label(node.name, systemImage: node.isFolder ? "folder" : "terminal")
+                                .padding(4)
                         }
-                        .dropDestination(for: String.self) { items, _ in
-                            drop(items, onto: node)
-                        }
+                        .onDrop(
+                            of: [.kremoteNode],
+                            delegate: NodeDropDelegate(
+                                target: node,
+                                // A connection is a legal drop target: it means
+                                // "put this beside that connection", i.e. into its
+                                // folder — the same rule as mRemoteNG.
+                                destination: node.isFolder
+                                    ? node.id
+                                    : ConnectionNode.parentID(of: node.id, in: model.roots),
+                                model: model,
+                                drop: drop
+                            )
+                        )
                 }
             }
             .listStyle(.sidebar)
+            // Dropping anywhere that is not a row moves to the top level: without
+            // this there was no way to take an item back out of a folder with the
+            // mouse, and the empty area below the tree is the natural target.
+            .onDrop(
+                of: [.kremoteNode],
+                delegate: RootDropDelegate(model: model, drop: drop)
+            )
+            .overlay {
+                if model.isRootDropTarget {
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Color.accentColor, lineWidth: 2)
+                        .padding(2)
+                        .allowsHitTesting(false)
+                }
+            }
         }
     }
 
-    /// Handles a drop of dragged node ids onto `target` (a folder nests them, a
-    /// connection sends them to that connection's parent folder).
-    private func drop(_ items: [String], onto target: ConnectionNode) -> Bool {
-        let destinationFolder = target.isFolder
-            ? target.id
-            : ConnectionNode.parentID(of: target.id, in: model.roots)
-        var movedAny = false
-        for uuidString in items {
-            guard let uuid = UUID(uuidString: uuidString) else { continue }
-            if model.move(uuid, toFolder: destinationFolder) { movedAny = true }
+    /// Moves the dragged nodes into `destination` (nil = top level).
+    ///
+    /// Returns whether anything moved, so the drop delegate can tell AppKit the
+    /// drop was accepted and play the snap-back animation when it was not. A
+    /// refused move is reported: silently doing nothing is indistinguishable from
+    /// a broken drag.
+    @discardableResult
+    private func drop(_ ids: [ConnectionNode.ID], into destination: ConnectionNode.ID?) -> Bool {
+        var moved = false
+        var refused = 0
+        for id in ids {
+            // A node into itself, or into its own descendant, is the one case the
+            // tree rules refuse — say so rather than appearing to work.
+            if id == destination || model.containsNode(destination, inside: id) {
+                refused += 1
+                continue
+            }
+            if model.move(id, toFolder: destination) { moved = true }
         }
-        return movedAny
+        if moved { NodeDrag.finish() }
+        if refused > 0 {
+            model.lastError = "A folder cannot be moved into itself or one of its own subfolders."
+        }
+        return moved
     }
 
     // MARK: - Alerts

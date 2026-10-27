@@ -38,8 +38,18 @@ final class RDPClient {
     /// Last size handed to the server, so repeated `layout()` passes do not each
     /// send a resize.
     private var lastResizeSize: CGSize?
+    /// The pane size and scale factor the last request was computed from, kept so
+    /// a scale change (moving the window to another display) is not mistaken for
+    /// an unchanged size.
+    private var lastPanePoints: CGSize = .zero
+    private var lastScaleFactor: Int = 100
     /// Retained for the session's lifetime: the C side keeps only a raw pointer.
     private var callbacks: Unmanaged<RDPBridgeCallbacks>?
+    /// The resolved settings this session connected with, so a resize can be
+    /// recomputed with the same desktop mode instead of guessing a scale.
+    private var options: RDPOptions?
+    /// Whether the wheel direction is reversed on top of macOS' own setting.
+    private(set) var invertScroll = false
 
     init(onStateChange: @escaping @MainActor (RDPClientState) -> Void) {
         let sink = RDPBridgeSink()
@@ -172,22 +182,27 @@ final class RDPClient {
         let retained = Unmanaged.passRetained(callbacks)
         self.callbacks = retained
 
-        // A custom size is requested up front; smart size / fit / fullscreen let
-        // the pane's size drive it and rely on Display Control afterwards.
-        let desktop: (Int, Int)
-        if let explicit = options.explicitDesktopSize {
-            desktop = explicit
-        } else if size.width > 0, size.height > 0 {
-            desktop = (Int(size.width), Int(size.height))
-        } else {
-            desktop = (1280, 800)
-        }
+        // The desktop is sized from the pane in *points* and the panel's backing
+        // scale, via `RDPOptions.desktopRequest`. A custom size bypasses both, and
+        // the scale factor goes to the server only when the desktop really is the
+        // backing-pixel grid — see `RDPDesktopMode`.
+        let scale = view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        let points = size.width > 0 && size.height > 0
+            ? size
+            : CGSize(width: 1280, height: 800)
+        let request = options.desktopRequest(panePoints: points, backingScale: scale)
+        let desktop = (request.width, request.height)
+        self.options = options
+        self.invertScroll = options.invertScroll
+        self.lastScaleFactor = request.scaleFactor
+        self.lastPanePoints = points
 
         var descriptor = krdp_descriptor()
         descriptor.port = UInt16(max(1, min(65535, port)))
         descriptor.width = Int32(desktop.0)
         descriptor.height = Int32(desktop.1)
         descriptor.color_depth = Int32(options.colorDepth)
+        descriptor.desktop_scale_factor = Int32(request.scaleFactor)
         descriptor.ignore_certificate = true
         descriptor.redirect_clipboard = options.redirectClipboard
         descriptor.redirect_drives = options.redirectDrives
@@ -247,15 +262,25 @@ final class RDPClient {
         callbacks = nil
     }
 
-    func resize(to size: CGSize) {
-        guard let handle, size.width > 0, size.height > 0 else { return }
+    /// Resizes the remote desktop for a pane of `points` on a display with
+    /// `backingScale`.
+    ///
+    /// The pane's *points* and the backing scale are what the desktop mode needs;
+    /// handing a pre-multiplied pixel size would throw away the choice and is what
+    /// produced a 2880x1800 desktop with a 100% UI on a Retina MacBook.
+    func resize(panePoints: CGSize, backingScale: CGFloat) {
+        guard let handle, panePoints.width > 0, panePoints.height > 0, let options else { return }
+        let request = options.desktopRequest(panePoints: panePoints, backingScale: backingScale)
         // `layout()` runs on every re-layout, and each call here sends a Display
         // Control resize to the server, which answers with a ResetGraphics that
         // tears down and rebuilds the graphics surfaces. Un-deduped that turns
         // ordinary relayouts into a visible hitch.
+        let size = CGSize(width: request.width, height: request.height)
         guard size != lastResizeSize else { return }
         lastResizeSize = size
-        krdp_client_resize(handle, Int32(size.width), Int32(size.height))
+        lastPanePoints = panePoints
+        lastScaleFactor = request.scaleFactor
+        krdp_client_resize(handle, Int32(request.width), Int32(request.height))
     }
 
     func sendMouse(at point: CGPoint, button: MouseButton, isDown: Bool) {
@@ -268,9 +293,13 @@ final class RDPClient {
         krdp_client_mouse_move(handle, Int32(point.x), Int32(point.y))
     }
 
-    func scroll(deltaX: CGFloat, deltaY: CGFloat) {
-        guard let handle else { return }
-        krdp_client_scroll(handle, Int32(deltaX), Int32(deltaY))
+    /// Sends wheel movement in whole notches. The caller accumulates the
+    /// fractional deltas a trackpad produces; a non-integral delta passed here
+    /// would be dropped or truncated, which is what made small upward scrolls
+    /// vanish.
+    func scroll(notchX: Int, notchY: Int) {
+        guard let handle, notchX != 0 || notchY != 0 else { return }
+        krdp_client_scroll(handle, Int32(notchX), Int32(notchY))
     }
 
     func sendKey(keyCode: UInt16, isDown: Bool) {

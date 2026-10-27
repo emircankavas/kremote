@@ -182,6 +182,24 @@ struct ConnectionEditorView: View {
                 }
             }
 
+            Picker("Desktop pixels", selection: $draft.rdp.desktopMode) {
+                Text("Inherit").tag(RDPDesktopMode?.none)
+                ForEach(RDPDesktopMode.allCases, id: \.self) { mode in
+                    Text(mode.displayName).tag(RDPDesktopMode?.some(mode))
+                }
+            }
+            .help(
+                """
+                Match panel: the remote desktop is the panel's size in points, so Windows' 100% UI \
+                is as large as it is on a normal monitor — readable on a Retina screen, slightly soft. \
+                Native pixels: the desktop is the Retina pixel grid and Windows renders at 180% — sharp, \
+                and still readable.
+                """
+            )
+
+            triState("Reverse scroll direction", $draft.rdp.invertScroll)
+                .help("Only needed when the wheel scrolls the remote desktop the wrong way after macOS' natural scrolling is taken into account.")
+
             triState("Redirect clipboard", $draft.rdp.redirectClipboard)
             triState("Redirect drives", $draft.rdp.redirectDrives)
             triState("Redirect printers", $draft.rdp.redirectPrinters)

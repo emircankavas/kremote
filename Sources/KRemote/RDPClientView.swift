@@ -126,10 +126,10 @@ struct RDPClientView: NSViewRepresentable {
             self.client = client
             view.attach(client: client)
 
-            // The connection needs the pane's real size before it starts, so the
-            // first frame is not letterboxed — and in *pixels*, not points, so a
-            // Retina pane gets a full-resolution desktop.
-            let size = view.bounds.width > 0 ? view.backingPixelSize : CGSize(width: 1280, height: 800)
+            // The connection needs the pane's real size before it starts, or the
+            // first frame is letterboxed. It is the pane's size in points; the
+            // desktop mode decides what the server is asked for.
+            let size = view.bounds.width > 0 ? view.panePointSize : CGSize(width: 1280, height: 800)
             client.connect(
                 host: host,
                 port: port,
@@ -152,7 +152,7 @@ struct RDPClientView: NSViewRepresentable {
             // gap; the bridge replays the request when Display Control connects.
             DispatchQueue.main.async { [weak view] in
                 guard let view, view.bounds.width > 0, view.bounds.height > 0 else { return }
-                client.resize(to: view.backingPixelSize)
+                client.resize(panePoints: view.panePointSize, backingScale: view.displayScale)
             }
         }
 
@@ -317,16 +317,16 @@ final class RDPHostView: NSView {
         ]
     }
 
-    /// This view's size in device pixels — what the remote desktop should be.
-    ///
-    /// Requesting the desktop in *points* is what made it look low-resolution:
-    /// on a Retina display the screen has twice the pixels, so a point-sized
-    /// desktop is half the available detail.
-    var backingPixelSize: CGSize {
-        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
-        return CGSize(width: size.width.rounded(), height: size.height.rounded())
+    /// The display scale this pane is drawn at. The desktop size is derived from
+    /// it in `RDPOptions.desktopRequest`, not here: whether the remote desktop is
+    /// the pane's points or its backing pixels is a user setting, and a view that
+    /// pre-multiplied by the scale would take that choice away.
+    var displayScale: CGFloat {
+        window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
     }
+
+    /// The pane's own size in points — what "match panel" means.
+    var panePointSize: CGSize { bounds.size }
 
     /// Maps a point in this view onto the remote desktop's pixel grid.
     ///
@@ -385,7 +385,7 @@ final class RDPHostView: NSView {
 
     override func layout() {
         super.layout()
-        client?.resize(to: backingPixelSize)
+        client?.resize(panePoints: panePointSize, backingScale: displayScale)
     }
 
     // MARK: - Input
@@ -412,8 +412,34 @@ final class RDPHostView: NSView {
     private func sendDragMove(_ event: NSEvent) {
         client?.sendMouseMove(at: remotePoint(convert(event.locationInWindow, from: nil)))
     }
+    /// Trackpad deltas arrive as small fractions (0.4, 0.8, …) and a wheel
+    /// mouse as whole lines. Both are accumulated per axis until a whole notch
+    /// is worth sending: `Int(delta)` alone truncates every small delta to zero,
+    /// which is why a gentle upward scroll did nothing at all — and why only one
+    /// direction ever seemed broken, since the two directions produce different
+    /// magnitudes on a trackpad.
+    private var wheelRemainder = CGSize.zero
+
     override func scrollWheel(with event: NSEvent) {
-        client?.scroll(deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY)
+        // A precise (trackpad) delta is in points and needs a threshold; a line
+        // delta from a wheel mouse is already one notch per unit.
+        let pointsPerNotch: CGFloat = event.hasPreciseScrollingDeltas ? 12 : 1
+        wheelRemainder.width += event.scrollingDeltaX
+        wheelRemainder.height += event.scrollingDeltaY
+
+        let notchesX = Int(wheelRemainder.width / pointsPerNotch)
+        let notchesY = Int(wheelRemainder.height / pointsPerNotch)
+        if notchesX == 0, notchesY == 0 { return }
+        wheelRemainder.width -= CGFloat(notchesX) * pointsPerNotch
+        wheelRemainder.height -= CGFloat(notchesY) * pointsPerNotch
+
+        // `scrollingDeltaY` is positive when the content should move down the
+        // document (i.e. the user scrolled up), which is also RDP's positive
+        // rotation. macOS has already applied the user's "natural scrolling"
+        // choice to this value, so no extra inversion belongs here.
+        let invert = client?.invertScroll ?? false
+        let sign = invert ? -1 : 1
+        client?.scroll(notchX: notchesX * sign, notchY: notchesY * sign)
     }
 
     override func keyDown(with event: NSEvent) {

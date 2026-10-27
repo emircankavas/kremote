@@ -110,6 +110,9 @@ struct krdp_client {
     int width;
     int height;
     int color_depth;
+    /// Scale factor announced to the server (100/140/180). Set from the
+    /// descriptor; 0 means 100.
+    int desktop_scale_factor;
     bool ignore_certificate;
     bool redirect_clipboard;
     bool redirect_drives;
@@ -198,6 +201,18 @@ static bool g_ssl_initialised = false;
 static bool g_addins_registered = false;
 
 // MARK: - Helpers
+
+/// Display Control only accepts 100, 140 and 180; anything else makes the client
+/// core data invalid and the session is refused. Anything unexpected is treated
+/// as 100 (the default) rather than passed through.
+static int krdp_valid_scale(int factor)
+{
+    switch (factor) {
+    case 140: return 140;
+    case 180: return 180;
+    default: return 100;
+    }
+}
 
 static char* krdp_strdup(const char* s)
 {
@@ -1467,6 +1482,7 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     client->width = descriptor->width > 0 ? descriptor->width : 1280;
     client->height = descriptor->height > 0 ? descriptor->height : 800;
     client->color_depth = descriptor->color_depth > 0 ? descriptor->color_depth : 32;
+    client->desktop_scale_factor = krdp_valid_scale(descriptor->desktop_scale_factor);
     client->ignore_certificate = descriptor->ignore_certificate;
     client->redirect_clipboard = descriptor->redirect_clipboard;
     client->redirect_drives = descriptor->redirect_drives;
@@ -1548,8 +1564,13 @@ krdp_client* krdp_client_create(const krdp_descriptor* descriptor,
     // The monitor scale factors must be one of 100/140/180 on the wire, set in
     // *both* slots: FreeRDP 3.27.x reads them crossed when it builds the monitor
     // definition, and an out-of-range value makes the client core data invalid.
-    freerdp_settings_set_uint32(s, FreeRDP_DesktopScaleFactor, 100);
-    freerdp_settings_set_uint32(s, FreeRDP_DeviceScaleFactor, 100);
+    //
+    // This is what makes a backing-pixel desktop usable on a Retina panel: the
+    // desktop is 2x the pane's points, so Windows has to draw its UI at 180% or
+    // everything is half size. Sending 100% while asking for backing pixels was
+    // the "unreadable on a MacBook" bug.
+    freerdp_settings_set_uint32(s, FreeRDP_DesktopScaleFactor, (UINT32)client->desktop_scale_factor);
+    freerdp_settings_set_uint32(s, FreeRDP_DeviceScaleFactor, (UINT32)client->desktop_scale_factor);
     // TCP keepalive: FreeRDP's defaults (5 s idle, 3 probes 2 s apart) are far
     // too tight for an interactive session and get dropped by stateful firewalls.
     freerdp_settings_set_uint32(s, FreeRDP_TcpKeepAliveDelay, 60);
@@ -1688,8 +1709,8 @@ static bool krdp_send_monitor_layout(krdp_client* client, int width, int height)
     layout.PhysicalWidth = (UINT32)width;
     layout.PhysicalHeight = (UINT32)height;
     layout.Orientation = 0;
-    layout.DesktopScaleFactor = 100;
-    layout.DeviceScaleFactor = 100;
+    layout.DesktopScaleFactor = (UINT32)krdp_valid_scale(client->desktop_scale_factor);
+    layout.DeviceScaleFactor = (UINT32)krdp_valid_scale(client->desktop_scale_factor);
     return ctx->disp->SendMonitorLayout(ctx->disp, 1, &layout) == CHANNEL_RC_OK;
 }
 
@@ -1743,26 +1764,53 @@ void krdp_client_mouse_move(krdp_client* client, int x, int y)
     freerdp_input_send_mouse_event(input, PTR_FLAGS_MOVE, (UINT16)x, (UINT16)y);
 }
 
-void krdp_client_scroll(krdp_client* client, int delta_x, int delta_y)
+/// Sends a vertical/horizontal wheel movement, in notches.
+///
+/// `notch_x` / `notch_y` are whole notches: +1 is one notch up/right, -1 one
+/// notch down/left. The wire format wants a 9-bit two's-complement rotation
+/// value where one notch is 120 units, so the conversion happens here rather
+/// than in Swift — that is also where the old bug lived (the caller scaled by
+/// an invented factor of 20 and set the sign flag backwards).
+void krdp_client_scroll(krdp_client* client, int notch_x, int notch_y)
 {
     if (!client || !client->instance) return;
     rdpInput* input = client->instance->context->input;
     if (!input) return;
-    if (delta_y != 0) {
+
+    // One notch is 120 units (MS-RDPBCGR); the encoder below mirrors FreeRDP's
+    // own macOS client (MRDPView.m): positive rotation scrolls up, and a
+    // negative rotation is the 9-bit two's complement of the magnitude.
+    // A wheel event without the mask bits is malformed, and Windows ignores it —
+    // which is exactly why an upward scroll produced nothing at all.
+    if (notch_y != 0) {
+        int magnitude = notch_y * 120;
         UINT16 flags = PTR_FLAGS_WHEEL;
-        int amount = delta_y * 20;
-        if (amount > 0) flags |= PTR_FLAGS_WHEEL_NEGATIVE;
-        if (amount > 255) amount = 255;
-        if (amount < -255) amount = -255;
-        freerdp_input_send_mouse_event(input, flags, 0, (UINT16)(abs(amount) & 0xFF));
+        unsigned step;
+        if (magnitude < 0) {
+            flags |= PTR_FLAGS_WHEEL_NEGATIVE;
+            step = (unsigned)(-magnitude);
+        } else {
+            step = (unsigned)magnitude;
+        }
+        if (step > 0xFF) step = 0xFF;
+        if (flags & PTR_FLAGS_WHEEL_NEGATIVE) step = 0x100 - step;
+        freerdp_input_send_mouse_event(input, flags | (UINT16)(step & 0xFF), 0, 0);
     }
-    if (delta_x != 0) {
+    if (notch_x != 0) {
+        // Horizontal: the sign convention is the opposite of the vertical one in
+        // FreeRDP's reference client (a positive dx is a negative rotation).
+        int magnitude = notch_x * 120;
         UINT16 flags = PTR_FLAGS_HWHEEL;
-        int amount = delta_x * 20;
-        if (amount > 0) flags |= PTR_FLAGS_WHEEL_NEGATIVE;
-        if (amount > 255) amount = 255;
-        if (amount < -255) amount = -255;
-        freerdp_input_send_mouse_event(input, flags, 0, (UINT16)(abs(amount) & 0xFF));
+        unsigned step;
+        if (magnitude > 0) {
+            flags |= PTR_FLAGS_WHEEL_NEGATIVE;
+            step = (unsigned)magnitude;
+        } else {
+            step = (unsigned)(-magnitude);
+        }
+        if (step > 0xFF) step = 0xFF;
+        if (flags & PTR_FLAGS_WHEEL_NEGATIVE) step = 0x100 - step;
+        freerdp_input_send_mouse_event(input, flags | (UINT16)(step & 0xFF), 0, 0);
     }
 }
 

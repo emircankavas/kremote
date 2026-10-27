@@ -42,6 +42,13 @@ final class AppModel {
     /// observes this and loads the node's draft.
     var editingNodeID: ConnectionNode.ID?
 
+    /// The sidebar row a drag is currently hovering, so the drop target is
+    /// visible. Drawing nothing while a drag is over a row is indistinguishable
+    /// from a row that refuses drops.
+    var dropHighlightID: ConnectionNode.ID?
+    /// True while a drag hovers the empty area of the sidebar (drop = top level).
+    var isRootDropTarget = false
+
     /// Open session tabs, in order.
     var sessions: [Session] = []
     var activeSessionID: Session.ID?
@@ -470,9 +477,21 @@ final class AppModel {
         persist()
     }
 
+    /// True when `candidate` is `ancestor` itself or sits inside it.
+    ///
+    /// The sidebar needs this before calling `move`, because `move` refuses the
+    /// case silently — and a silently refused drag reads as a broken drag.
+    func containsNode(_ candidate: ConnectionNode.ID?, inside ancestor: ConnectionNode.ID) -> Bool {
+        guard let candidate else { return false }
+        return ConnectionNode.contains(ancestor, candidate, in: roots)
+    }
+
     /// Moves a node into a folder (nil = root). No-op when the move is invalid.
     @discardableResult
     func move(_ id: ConnectionNode.ID, toFolder folderID: ConnectionNode.ID?) -> Bool {
+        // A move that changes nothing (dropped back where it already is) counts as
+        // done: reporting it as a failure would make a harmless drop look refused.
+        if ConnectionNode.parentID(of: id, in: roots) == folderID { return true }
         guard ConnectionNode.move(id, to: folderID, in: &roots) else { return false }
         persist()
         return true
@@ -813,6 +832,29 @@ final class AppModel {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let index = sessions.firstIndex(where: { $0.id == id }) else { return }
         sessions[index].remoteTitle = trimmed
+    }
+
+    /// Reorders the open tabs, which is what a drag along the tab strip means.
+    func moveTab(_ id: Session.ID, to destination: Int) {
+        guard let source = sessions.firstIndex(where: { $0.id == id }) else { return }
+        sessions = TabOrdering.move(sessions, from: source, to: destination)
+    }
+
+    /// Moves the active tab by `offset`, wrapping at either end (⇧⌘[ / ⇧⌘]).
+    func activateAdjacentTab(offset: Int) {
+        guard sessions.count > 1,
+              let current = activeSessionID,
+              let index = sessions.firstIndex(where: { $0.id == current }) else { return }
+        let count = sessions.count
+        let next = ((index + offset) % count + count) % count
+        activateTab(sessions[next].id)
+    }
+
+    /// Activates the nth tab (⌘1…⌘9), counting from the left.
+    func activateTab(number: Int) {
+        let index = number - 1
+        guard sessions.indices.contains(index) else { return }
+        activateTab(sessions[index].id)
     }
 
     func closeSession(_ id: Session.ID) {

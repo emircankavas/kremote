@@ -26,6 +26,24 @@
 	<string>KRemote</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<!-- The sidebar's drag type. Exported so the pasteboard carries a real UTI
+	     instead of an unregistered identifier string; scoped to this app, because
+	     the payload is node ids that mean nothing to anyone else. -->
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.emircankavas.kremote.node</string>
+			<key>UTTypeDescription</key>
+			<string>KRemote connection</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict/>
+		</dict>
+	</array>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Emircan Kavas. Released under the MIT license.</string>
 </dict>
